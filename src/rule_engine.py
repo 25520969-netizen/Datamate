@@ -372,7 +372,7 @@ class RuleEngine:
             selected_keys.append("4. Công nợ")
 
         # Mục 5: Kho, nhập hàng, giá vốn, lãi gộp, lãi ròng, bảng giá
-        if any(
+        has_sec5 = any(
             kw in q
             for kw in [
                 "nhập",
@@ -384,9 +384,9 @@ class RuleEngine:
                 "gia von",
                 "lãi",
                 "lai ",
-                "lời",
                 "hết hàng",
-                "ế",
+                "hàng ế",
+                "bán ế",
                 "bảng giá",
                 "tăng giá",
                 "đơn giá",
@@ -395,7 +395,8 @@ class RuleEngine:
                 "hộp",
                 "lốc",
             ]
-        ):
+        ) or bool(re.search(r"\b(?:lời|tiền lời|sinh lời|có lời|hàng ế|tồn ế)\b", q))
+        if has_sec5:
             selected_keys.append("5. Kho, nhập hàng, giá vốn")
 
         # Mục 6: Theo ngành (chỉ nạp tiểu mục của đúng ngành cần thiết, tiết kiệm ~4000 ký tự prompt)

@@ -325,9 +325,9 @@ class DataMateAgent:
             try:
                 llm_reply = self.llm_client.generate(messages)
             except Exception as llm_exc:
-                if self.verbose:
-                    resp_body = getattr(getattr(llm_exc, "response", None), "text", "")
-                    print(f"    [LLM Error] {qid} (attempt {attempt+1}): {llm_exc} | {resp_body[:300]}")
+                resp_body = getattr(getattr(llm_exc, "response", None), "text", "")
+                err_detail = f" | {resp_body[:300]}" if resp_body else ""
+                print(f"    ⚠️ [LLM Error] {qid} ({business_id}, attempt {attempt+1}): {llm_exc}{err_detail}", flush=True)
                 return {"id": qid, "type": "abstain"}
 
             exec_outcome = self.sandbox.execute(

@@ -182,10 +182,14 @@ def main() -> None:
         print(f"✅ Đã bảo lưu {len(existing_cache)} câu trả lời tốt từ trước (bỏ qua không cần tính lại).")
 
     # Chuẩn bị và nạp trước Parquet cache cho các doanh nghiệp cần truy vấn để các luồng không tranh chấp IO
-    biz_ids = {q["business_id"] for q in questions}
+    biz_ids = sorted(list({q["business_id"] for q in questions}))
     print(f"Kiểm tra và nạp sẵn dữ liệu cho {len(biz_ids)} doanh nghiệp...")
-    for bid in sorted(biz_ids):
+    t_prewarm = time.time()
+    for idx, bid in enumerate(biz_ids, 1):
+        t0 = time.time()
         agent.store.load_tables(bid, use_cache=True)
+        print(f"  [{idx:02d}/{len(biz_ids)}] {bid}: Sẵn sàng ({time.time() - t0:.1f}s)", flush=True)
+    print(f"✅ Đã chuẩn bị xong dữ liệu {len(biz_ids)} doanh nghiệp trong {time.time() - t_prewarm:.1f}s!")
 
     results: List[Optional[Dict[str, Any]]] = [None] * len(questions)
     completed_count = 0

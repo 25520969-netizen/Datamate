@@ -17,11 +17,18 @@ import json
 import re
 import sqlite3
 import unicodedata
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import duckdb
 import pandas as pd
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+try:
+    pd.set_option("future.no_silent_downcasting", True)
+except Exception:
+    pass
 
 
 ORDER_ID_CANDIDATES = {
@@ -732,7 +739,7 @@ class BusinessDataStore:
             stem = to_nfc(file_path.stem).strip()
 
             if suffix == ".csv":
-                df = pd.read_csv(file_path, encoding="utf-8")
+                df = pd.read_csv(file_path, encoding="utf-8", low_memory=False)
                 df = apply_rulebook_section8_cleaning(df)
                 df = normalize_dataframe_nfc(df)
                 raw_tables[stem] = df

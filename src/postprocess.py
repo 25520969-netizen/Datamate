@@ -130,6 +130,28 @@ def normalize_date_str(val: Any) -> Optional[str]:
     return None
 
 
+def strip_trailing_measurement_in_parens(s: str) -> str:
+    """
+    Chỉ loại bỏ ngoặc đơn nếu bên trong là số tiền, số lượng hoặc số đo do LLM tự ghi chú thêm
+    (ví dụ: " (1.605.000)", " (307 ly)", " (15 chai)", " (50 đ)").
+    TUYỆT ĐỐI KHÔNG BỎ hậu tố size/liều lượng/quy cách là một phần của tên sản phẩm:
+    (M), (L), (S), (XL), (chai 500ml), (hộp 24 gói), (500mg), v.v.
+    """
+    if not isinstance(s, str):
+        return s
+    m = re.search(r"\s*\(([^)]+)\)\s*$", s)
+    if not m:
+        return s.strip()
+    inside = m.group(1).strip()
+    # Nếu là size ngắn (M, L, S, XL, XXL) hoặc quy cách sản phẩm (500mg, 100ml, v.v.), giữ nguyên
+    if re.match(r"^[a-zA-Z0-9\s]{1,4}$", inside) or re.search(r"(?:mg|ml|kg|gam|g|hộp|vỉ|chai|gói)\s*\d*", inside, re.I):
+        return s.strip()
+    # Nếu chứa số tiền hoặc số lượng kèm đơn vị (1.000đ, 307 ly, 10 cái), loại bỏ
+    if re.search(r"[\d\.,\s]+(?:đ|vnđ|đồng|ly|chai|nồi|hộp|lon|cái|kg|g|%|bill|đơn|k|cuộn)", inside, re.I) or re.match(r"^[\d\.,\s]+$", inside):
+        return s[:m.start()].strip()
+    return s.strip()
+
+
 def postprocess_and_guard(
     question_id: str,
     question: str,
@@ -238,6 +260,10 @@ def postprocess_and_guard(
         if float(ans_val) < -100.0:
             return abstain_resp
 
+        # Tự động quy đổi tỷ số thập phân nếu model trả về dạng tỷ lệ 0 < val < 1.0 (vd: 0.403 cho 40.3%, 0.3517 cho 35.17%)
+        if 0.0 < abs(float(ans_val)) < 1.0:
+            ans_val = float(ans_val) * 100.0
+
         final_pct = round_half_up_2dec(float(ans_val))
 
         # Sanity Guard 4: Tỉ trọng / Tỉ lệ đóng góp không thể vượt quá 100% hoặc nhỏ hơn 0%
@@ -275,7 +301,7 @@ def postprocess_and_guard(
         # -> Tự động chuyển đổi thành type "list" chuẩn JSON
         if "," in clean_str and (expected_type == "list" or any(kw in question.lower() for kw in ["top", "danh sách", "liệt kê", "các", "những"])):
             parts = [
-                re.sub(r"\s*\([^)]*\)", "", unicodedata.normalize("NFC", p)).strip()
+                strip_trailing_measurement_in_parens(unicodedata.normalize("NFC", p)).strip()
                 for p in clean_str.split(",")
                 if p.strip()
             ]
@@ -284,7 +310,8 @@ def postprocess_and_guard(
                 return {"id": question_id, "type": "list", "answer": parts}
 
         # Loại bỏ các số đo / số tiền trong ngoặc đơn (vd: 'KH0014 (1,605,000)' -> 'KH0014', 'Trà đào (307 ly)' -> 'Trà đào')
-        clean_str = re.sub(r"\s*\([^)]*\)", "", clean_str).strip()
+        # Nhưng TUYỆT ĐỐI giữ nguyên hậu tố size như '(M)', '(L)', '(500mg)'
+        clean_str = strip_trailing_measurement_in_parens(clean_str)
 
         # Mục 3 Rulebook: Khách lẻ / kl không phải khách, không xếp hạng
         if clean_str.lower() in ("khách lẻ", "khach le", "lẻ", "le", "kl", "khách vãng lai"):
@@ -314,7 +341,7 @@ def postprocess_and_guard(
                 else:
                     parts = [clean_s]
                 ans_val = [
-                    re.sub(r"\s*\([^)]*\)", "", re.sub(r"^\s*[-*•\d\.\)]+\s*", "", p)).strip()
+                    strip_trailing_measurement_in_parens(re.sub(r"^\s*[-*•\d\.\)]+\s*", "", p))
                     for p in parts
                 ]
                 ans_val = [p for p in ans_val if p and p.lower() not in ("khách lẻ", "khach le", "lẻ", "le", "kl", "khách vãng lai")]
@@ -337,8 +364,8 @@ def postprocess_and_guard(
                     cleaned_list.append(round_half_up_2dec(float(item)))
             elif isinstance(item, str):
                 s_item = unicodedata.normalize("NFC", item).strip()
-                # Loại bỏ số tiền/số lượng trong ngoặc đơn của item
-                s_item = re.sub(r"\s*\([^)]*\)", "", s_item).strip()
+                # Loại bỏ số tiền/số lượng trong ngoặc đơn của item (giữ nguyên size như (M), (L))
+                s_item = strip_trailing_measurement_in_parens(s_item)
                 # Khử khách lẻ
                 if s_item.lower() in ("khách lẻ", "khach le", "lẻ", "le", "kl", "khách vãng lai", "none", "nan", "null"):
                     continue

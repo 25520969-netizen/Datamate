@@ -209,6 +209,38 @@ def test_postprocess_penalized_accuracy_guard():
     assert pred_pct == {"id": "q_pct", "type": "abstain"}
 
 
+def test_strip_trailing_measurement_and_percent_scaling():
+    from src.postprocess import strip_trailing_measurement_in_parens
+
+    # Giữ nguyên hậu tố kích cỡ hoặc quy cách sản phẩm
+    assert strip_trailing_measurement_in_parens("Cà phê sữa (M)") == "Cà phê sữa (M)"
+    assert strip_trailing_measurement_in_parens("Trà đào cam sả (L)") == "Trà đào cam sả (L)"
+    assert strip_trailing_measurement_in_parens("Panadol Extra (500mg)") == "Panadol Extra (500mg)"
+    assert strip_trailing_measurement_in_parens("Khăn ướt (gói)") == "Khăn ướt (gói)"
+
+    # Loại bỏ tiền hoặc số lượng kèm đơn vị do LLM tự chú thích
+    assert strip_trailing_measurement_in_parens("Nguyễn Văn A (1.500.000đ)") == "Nguyễn Văn A"
+    assert strip_trailing_measurement_in_parens("Trà sữa trân châu (307 ly)") == "Trà sữa trân châu"
+    assert strip_trailing_measurement_in_parens("Khách hàng KH0014 (1,605,000)") == "Khách hàng KH0014"
+
+    # Tự động quy đổi tỷ số thập phân 0 < x < 1.0 sang % chuẩn
+    res_pct = postprocess_and_guard(
+        question_id="q_ratio",
+        question="Tỉ lệ hủy đơn là bao nhiêu phần trăm?",
+        raw_output={"type": "percent", "answer": 0.403},
+        expected_type="percent",
+    )
+    assert res_pct["answer"] == 40.3
+
+    res_pct2 = postprocess_and_guard(
+        question_id="q_ratio2",
+        question="Tỉ lệ là bao nhiêu?",
+        raw_output={"type": "percent", "answer": 35.17},
+        expected_type="percent",
+    )
+    assert res_pct2["answer"] == 35.17
+
+
 # ==============================================================================
 # 5. KIỂM THỬ MODULE 3: END-TO-END AGENT & SELF-CORRECTION LOOP (QWEN 7B)
 # ==============================================================================

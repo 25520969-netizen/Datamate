@@ -182,10 +182,10 @@ class DateResolver:
                 }
             )
 
-        if re.search(r"\b(hôm\s*qua|hom\s*qua|bữa\s*qua|bua\s*qua)\b", q_lower):
+        if re.search(r"\b(hôm\s*qua|hom\s*qua|bữa\s*qua|bua\s*qua|hqua|h\/qua|ngay\s*qua)\b", q_lower):
             detected.append(
                 {
-                    "expr": "Hôm qua (bao gồm phương ngữ bữa qua / hom qua)",
+                    "expr": "Hôm qua (bao gồm phương ngữ bữa qua / hom qua / hqua)",
                     "start_date": yesterday.isoformat(),
                     "end_date": yesterday.isoformat(),
                     "note": f"Chính là ngày hôm qua ({yesterday.isoformat()})",
@@ -349,7 +349,14 @@ class DateResolver:
     def format_for_prompt(self, question: str, as_of_date_str: str) -> str:
         """Định dạng thông tin thời gian thành đoạn văn bản rõ ràng để đưa vào Prompt LLM."""
         ctx = self.resolve(question, as_of_date_str)
-        lines = [
+        lines = []
+        if ctx["detected_periods"]:
+            lines.append("⭐ MỐC THỜI GIAN MỤC TIÊU CẦN TRUY VẤN (BẮT BUỘC LỌC ĐÚNG KHOẢNG NÀY, KHÔNG LẤY CẢ BẢNG):")
+            for p in ctx["detected_periods"]:
+                lines.append(f"  * {p['expr']}: từ '{p['start_date']}' đến '{p['end_date']}' ({p['note']})")
+            lines.append("")
+
+        lines.extend([
             f"- Hôm nay (`as_of_date`): {ctx['as_of_date']} (Mọi bản ghi có ngày > {ctx['as_of_date']} coi như chưa xảy ra, trừ trạng thái huỷ/trả ghi trên đơn).",
             f"- Hôm qua: {ctx['yesterday'][0]}",
             f"- Tuần này (Thứ Hai -> Hôm nay): {ctx['this_week'][0]} đến {ctx['this_week'][1]}",
@@ -358,9 +365,5 @@ class DateResolver:
             f"- Tháng trước (cả tháng): {ctx['prev_month_full'][0]} đến {ctx['prev_month_full'][1]}",
             f"- Kỳ 'so với tháng trước' (khi so với 'tháng này' - cùng số ngày): {ctx['prev_month_same_days'][0]} đến {ctx['prev_month_same_days'][1]}",
             f"- Từ đầu năm tới nay: {ctx['ytd'][0]} đến {ctx['ytd'][1]}",
-        ]
-        if ctx["detected_periods"]:
-            lines.append("- Các mốc thời gian phát hiện trực tiếp trong câu hỏi:")
-            for p in ctx["detected_periods"]:
-                lines.append(f"  * {p['expr']}: từ {p['start_date']} đến {p['end_date']} ({p['note']})")
+        ])
         return "\n".join(lines)

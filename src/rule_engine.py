@@ -163,9 +163,9 @@ class RuleEngine:
         """
         q = question.lower().strip()
 
-        # 1. Table: bảng / mỗi ... kèm số tiền / danh sách ... và doanh thu/số tiền/số lượng
+        # 1. Table: bảng / mỗi ... kèm số tiền / danh sách ... và doanh thu/số tiền/số lượng/công nợ
         if (
-            re.search(r"\b(?:top\s*\d+|danh\s*sách|bảng)\b.*\bkèm\s+(?:số\s+tiền|doanh\s+thu|số\s+lượng|số\s+nợ|tiền\s+nợ|công\s+nợ|hoa\s+hồng)", q)
+            re.search(r"\b(?:top\s*\d+|danh\s*sách|bảng)\b.*\b(?:kèm|và)\s+(?:số\s+tiền|doanh\s+thu|số\s+lượng|số\s+nợ|tiền\s+nợ|công\s+nợ|hoa\s+hồng)", q)
             or any(
                 kw in q
                 for kw in [
@@ -180,6 +180,10 @@ class RuleEngine:
                     "từng khách còn nợ bao nhiêu",
                     "từng người còn nợ",
                     "từng người nha",
+                    "mỗi người còn nợ",
+                    "số nợ của từng",
+                    "nợ của từng người",
+                    "nợ của mỗi người",
                 ]
             )
         ):
@@ -329,6 +333,13 @@ class RuleEngine:
             has_exp = any(any(k in c for k in ["hạn sử dụng", "hạn dùng", "hansudung", "hsd", "expiry", "exp_date"]) for c in all_cols)
             if not has_exp:
                 return True, "Shop không có thông tin hạn sử dụng cho mặt hàng này."
+
+        # 10. Tồn kho khi shop không có bảng tồn kho và không có dữ liệu nhập hàng
+        if re.search(r"(?:trong\s*kho|tồn\s*kho|ton\s*kho|kho\s*còn|còn\s+.*(?:trong\s*kho|kho)|còn\s+bao\s+nhiêu\s+cái)", q):
+            has_stock_tbl = any(any(k in t for k in ["ton_kho", "tonkho", "tồn kho", "tồn_kho", "nhap", "nhập"]) for t in all_tbl_names)
+            has_stock_col = any(any(k in c for k in ["tồn cuối", "tồn thực", "ton kho", "tồn kho", "sl nhập", "số lượng nhập"]) for c in all_cols)
+            if not (has_stock_tbl or has_stock_col):
+                return True, "Shop chỉ có dữ liệu bán hàng, không có bảng tồn kho hoặc dữ liệu nhập hàng để tính tồn kho."
 
         return False, ""
 

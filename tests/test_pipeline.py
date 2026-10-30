@@ -420,3 +420,32 @@ def test_subtotal_isolation_and_dynamic_entity_grounder():
     # Kiểm tra strip_accents
     assert strip_accents("Cơm chiên hải sản") == "com chien hai san"
     assert strip_accents("Đỗ Đức An") == "do duc an"
+
+
+def test_hqua_date_resolution_and_unanswerable_inventory():
+    resolver = DateResolver(calendar_path=CALENDAR_PATH)
+    ctx = resolver.resolve("Tổng dthu hqua là bao nhiêu?", "2026-02-10")
+    detected = ctx.get("detected_periods", [])
+    assert len(detected) >= 1
+    assert detected[0]["start_date"] == "2026-02-09"
+    assert detected[0]["end_date"] == "2026-02-09"
+
+    engine = RuleEngine(rulebook_path=RULEBOOK_PATH)
+    # Kiểm tra suy đoán type table
+    assert engine.infer_expected_type("Top 3 khách hàng có công nợ lớn nhất đến hết ngày 28/07/2026 và số nợ của từng người?") == "table"
+    assert engine.infer_expected_type("tính đến hết ngày 10/08/2025, 3 khách nào đang nợ nhìu nhất, mỗi người còn nợ bao nhiêu") == "table"
+
+    # Kiểm tra unanswerable khi hỏi tồn kho trên shop không có bảng tồn kho / nhập hàng
+    store = BusinessDataStore(data_root=DATA_ROOT)
+    is_unans, reason = engine.detect_unanswerable_deterministic(
+        question_obj={
+            "id": "q_test_stock",
+            "business_id": "biz_118",
+            "question": "hết hôm nay, gạch thẻ đặc 4x8x18 còn laij mấy viên trong kho",
+            "as_of_date": "2026-09-10",
+        },
+        store=store,
+        date_resolver=resolver,
+    )
+    assert is_unans is True
+    assert "tồn kho" in reason.lower()

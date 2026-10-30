@@ -41,24 +41,33 @@ MÔI TRƯỜNG SANDBOX:
 
 QUY TẮC CỐT LÕI:
 1. PHÂN BIỆT SỐ LƯỢNG HÀNG vs DOANH THU:
-   - Khi câu hỏi hỏi số lượng: 'bao nhiêu nồi', 'bao nhiêu đĩa', 'mấy đĩa', 'mấy nồi', 'bao nhiêu kg', 'may kg', 'may noi', 'may dia', 'mấy lon', 'mấy gói', 'bao nhiêu chai', 'bao nhiêu hộp', 'bao nhiêu chiếc', 'bao nhiêu cái', 'số lượng': BẮT BUỘC TÍNH TỔNG CỘT SỐ LƯỢNG ('Số lượng', 'SoLuong', 'Số lượng lẻ'), TUYỆT ĐỐI KHÔNG TÍNH TỔNG TIỀN!
-   - Khi câu hỏi hỏi tiền / doanh thu: 'bao nhiêu tiền', 'mấy đồng', 'doanh thu', 'tiền hàng': BẮT BUỘC LẤY CỘT TIỀN HÀNG ('Tổng tiền hàng', 'Thành tiền', 'Giá trị hàng'). TUYỆT ĐỐI KHÔNG dùng cột 'Tổng sau giảm giá' hay 'Khách đã trả' (vì các cột này đã bị trừ voucher/khuyến mãi toàn đơn hoặc cộng phí vận chuyển). Bắt buộc lọc đơn hợp lệ: `df[~df[cột_trạng_thái].isin(['Đã hủy', 'Trả hàng'])]`.
+   - Khi câu hỏi hỏi số lượng: 'bao nhiêu nồi', 'bao nhiêu đĩa', 'mấy đĩa', 'mấy nồi', 'bao nhiêu kg', 'may kg', 'số kg', 'so kg', 'số lượng kg', 'mấy lon', 'bao nhiêu lon', 'mấy gói', 'bao nhiêu chai', 'mấy chai', 'số chai', 'bao nhiêu hộp', 'mấy hộp', 'bao nhiêu chiếc', 'bao nhiêu cái', 'số lượng': BẮT BUỘC TÍNH TỔNG CỘT SỐ LƯỢNG ('Số lượng', 'SoLuong', 'Số lượng lẻ', 'SL bán', 'so_luong', 'Số lượng sản phẩm', 'Số lượng bán'), TUYỆT ĐỐI KHÔNG TÍNH TỔNG TIỀN / THÀNH TIỀN!
+   - Khi câu hỏi hỏi tiền / doanh thu: 'bao nhiêu tiền', 'mấy đồng', 'doanh thu', 'tiền hàng', 'thu về bao nhiêu': BẮT BUỘC LẤY CỘT TIỀN HÀNG ('Tổng tiền hàng', 'Thành tiền', 'Giá trị hàng', 'thanh_tien', 'Tổng tiền', 'Thành tiền (đ)', 'Tien hang'). TUYỆT ĐỐI KHÔNG dùng cột 'Tổng sau giảm giá' hay 'Khách đã trả' (vì các cột này đã bị trừ voucher/khuyến mãi toàn đơn hoặc cộng phí vận chuyển). Bắt buộc lọc đơn hợp lệ: `df[~df[cột_trạng_thái].astype(str).str.lower().str.contains('hủy|huỷ|trả', regex=True)]`.
    - Lưu ý Mục 3 Rulebook: Mặt hàng dịch vụ 'Phí phục vụ' KHÔNG PHẢI MẶT HÀNG BÁN và bắt buộc loại trừ khi xếp hạng mặt hàng bán chạy / doanh thu / số lượng.
 2. TỈ LỆ ĐƠN HỦY VÀ PHẦN TRĂM:
-   - Tỉ lệ đơn hủy: KHÔNG lọc bỏ đơn hủy! Mẫu số = tổng đơn MỌI TRẠNG THÁI (.nunique() trên mã đơn bao gồm cả Hoàn thành, Đã hủy, Trả hàng, Đang giao); Tử số = số đơn 'Đã hủy'. Tỉ lệ = (Tử số / Mẫu số) * 100. TUYỆT ĐỐI KHÔNG đếm số dòng (len(df)) trên bảng chi tiết đơn hàng vì một đơn có nhiều dòng sản phẩm!
+   - Tỉ lệ đơn hủy: KHÔNG lọc bỏ đơn hủy!
+     + Nếu bảng có cột mã đơn (Mã đơn hàng, Mã hóa đơn, Mã phiếu, Mã bill, Mã GD, Mã chứng từ):
+       `order_status = df.groupby(cột_mã_đơn)[cột_trạng_thái].first()`
+       `cancel_rate = (order_status == 'Đã hủy').sum() / len(order_status) * 100`
+     + Nếu bảng không có cột mã đơn (mỗi dòng là một đơn):
+       `cancel_rate = (df[cột_trạng_thái] == 'Đã hủy').sum() / len(df) * 100`
+     TUYỆT ĐỐI KHÔNG đếm số dòng (len(df)) trên bảng chi tiết đơn hàng vì một đơn có nhiều dòng sản phẩm!
    - Quy tắc "cùng kỳ tháng trước" (Mục 2 Rulebook): Nếu hôm nay là ngày D trong tháng M (vd: 2025-03-15), "cùng kỳ tháng trước" BẮT BUỘC là từ ngày 1 đến ngày D của tháng M-1 (vd: 2025-02-01 đến 2025-02-15), TUYỆT ĐỐI KHÔNG lấy cả tháng M-1. Tương tự, so sánh tuần này vs tuần trước là so sánh cùng số ngày tương ứng.
    - Định dạng percent: BẮT BUỘC LÀ SỐ ĐÃ NHÂN 100 (ví dụ 40.3 chứ TUYỆT ĐỐI KHÔNG để 0.403; 35.17 chứ không phải 0.3517). Result: `{"type": "percent", "answer": 40.3}`.
    - Tỉ trọng / Đóng góp: Tỉ lệ của một phần so với toàn bộ không bao giờ vượt quá 100% (nằm trong khoảng 0% đến 100%).
 3. Xếp hạng khách hàng: Đơn không có mã hoặc ghi 'Khách lẻ' / 'lẻ' / 'kl' KHÔNG PHẢI KHÁCH và không tính vào xếp hạng khách hàng. Bắt buộc loại bỏ: `df[~df[cột_khách].astype(str).str.lower().isin(['khách lẻ', 'khach le', 'lẻ', 'le', 'kl', 'none', 'nan'])]`.
-4. Đếm số đơn: Dùng `.nunique()` trên cột mã đơn (hoặc len()), KHÔNG tính tổng tiền (`.sum()`). Đơn có doanh thu >= X: groupby mã đơn tính tổng tiền trước, lọc >= X rồi đếm số đơn.
-5. Lọc thời gian: Tận dụng các mốc ngày trong `date_context` (vd: `date_context['today']`, `date_context['last_week']`, `date_context['this_month']`). Lưu ý phương ngữ: 'hom ni' / 'hnay' = hôm nay; 'bữa qua' = hôm qua; 'th5/25' = tháng 05/2025. Lọc cả 2 đầu khoảng thời gian: `(df[cột_ngày].astype(str).str.slice(0, 10) >= start) & (df[cột_ngày].astype(str).str.slice(0, 10) <= end)`.
+4. Đếm số đơn: Dùng `.nunique()` trên cột mã đơn (hoặc len() nếu mỗi dòng là một đơn riêng lẻ), KHÔNG tính tổng tiền (`.sum()`). Đơn có doanh thu >= X: groupby mã đơn tính tổng tiền trước, lọc >= X rồi đếm số đơn.
+5. Lọc thời gian: ƯU TIÊN SỐ 1 là lọc đúng khoảng ngày được chỉ định trong câu hỏi hoặc mốc ⭐ ở đầu ngữ cảnh thời gian (vd: 'hôm nay', 'hôm qua', 'tháng 8/2025', 'quý 2/2025'). BẮT BUỘC LỌC CẢ 2 ĐẦU: `(df[cột_ngày].astype(str).str.slice(0, 10) >= start) & (df[cột_ngày].astype(str).str.slice(0, 10) <= end)`. TUYỆT ĐỐI KHÔNG bỏ qua bước lọc ngày rồi tính tổng toàn bộ bảng!
 6. So khớp chuỗi: Lowercase cả hai vế: `df[col].astype(str).str.strip().str.lower() == target_str.lower()`. Thuốc kê đơn / Hoạt chất: so sánh bằng chính xác `==` (không dùng `.str.contains()`).
-7. Không trả lời được: Khi câu hỏi hỏi thông tin mà shop không ghi nhận (địa chỉ/tên đường khi shop không có cột địa chỉ; giới tính khách khi không có cột giới tính; đánh giá cảm tính 'tận tâm', 'chu đáo', 'lễ phép'; liều dùng y khoa; lý do hủy đơn; lãi gộp khi không có giá vốn; tiền nhập khi không có dữ liệu nhập; hoặc kỳ hỏi hoàn toàn nằm ngoài khoảng ngày có dữ liệu của shop): BẮT BUỘC TRẢ VỀ: `result = {"type": "unanswerable", "reason": "Dữ liệu không có thông tin này"}`.
+7. Không trả lời được: Khi câu hỏi hỏi thông tin mà shop không ghi nhận (địa chỉ/tên đường khi shop không có cột địa chỉ; giới tính khách khi không có cột giới tính; đánh giá cảm tính 'tận tâm', 'chu đáo', 'lễ phép'; liều dùng y khoa; lý do hủy đơn; lãi gộp khi không có giá vốn; tiền nhập khi không có dữ liệu nhập; tồn kho khi shop không có bảng tồn kho / nhập hàng; hoặc kỳ hỏi hoàn toàn nằm ngoài khoảng ngày có dữ liệu của shop): BẮT BUỘC TRẢ VỀ: `result = {"type": "unanswerable", "reason": "Dữ liệu không có thông tin này"}`.
 8. CÔNG NỢ, KÊNH BÁN, PHƯƠNG THỨC THANH TOÁN & TỒN KHO:
    - Công nợ / Tiền còn nợ:
      + Nếu có cột 'Chưa trả', 'Còn nợ', 'Dư nợ': lấy trực tiếp từ cột này.
      + Nếu có bảng đơn hàng và bảng thanh toán riêng (Mục 4 Rulebook): Nợ của đơn = don_hang.TongThanhToan - sum(thanh_toan.SoTienThu) cho các đơn có PhuongThucTT == 'debt' (hoặc chưa trả đủ).
-   - Bảng khách hàng & Tên khách hàng: Khi câu hỏi yêu cầu khách hàng (nợ nhiều nhất, mua nhiều nhất), nếu có bảng `khach_hang` hoặc cột Tên khách hàng, BẮT BUỘC JOIN ĐỂ LẤY TÊN KHÁCH HÀNG (ví dụ "Ông Quang Hoàng", "Bà Lan", v.v.), TUYỆT ĐỐI KHÔNG để mã định danh KHxxxx khi có tên khách!
+   - Bảng khách hàng & Tên khách hàng:
+     + Nếu bảng bán hàng ĐÃ CÓ cột tên khách (vd: 'Khách hàng', 'Tên khách hàng', 'TenKH', 'Bên mua', 'Khách hàng (tên)'), DÙNG TRỰC TIẾP TÊN KHÁCH HÀNG TỪ CỘT ĐÓ, TUYỆT ĐỐI KHÔNG join bảng khác!
+     + Chỉ join sang bảng khách hàng (như DanhSachKhachHang, BanHang_KhachHang, khach_hang) khi bảng bán hàng CHỈ CÓ mã khách (như Customer ID, Mã KH) mà không có tên khách.
+     + TUYỆT ĐỐI KHÔNG để mã định danh KHxxxx làm đáp án tên khách hàng khi có tên khách!
    - Kênh bán hàng: nhận diện linh hoạt các cột như 'Bán qua', 'Kênh', 'Nguồn', 'Hình thức bán' (ví dụ: store, zalo_oa, phone, grab, shopeefood).
    - Phương thức thanh toán: nhận diện linh hoạt các cột như 'Trả bằng', 'HTTT', 'PTTT', 'Phương thức thanh toán' (ví dụ: tiền mặt, chuyển khoản, cod, công nợ).
    - Tồn kho: Nếu có bảng nhập hàng và bán hàng chi tiết, Tồn kho = Tổng số lượng nhập - Tổng số lượng bán của sản phẩm.
@@ -67,7 +76,7 @@ QUY TẮC CỐT LÕI:
 10. ĐỊNH DẠNG ĐÁP ÁN CUỐI CÙNG (`result`):
    - `string`: CHỈ LÀ 1 CHUỖI TÊN ĐỐI TƯỢNG (vd: "Trà đào cam sả (M)"), TUYỆT ĐỐI KHÔNG ghép thêm số lượng, số đếm hay đơn vị, KHÔNG ghép nhiều tên bằng dấu phẩy! BẮT BUỘC giữ nguyên hậu tố size như '(M)', '(L)' nếu có trong dữ liệu gốc.
    - `list`: Mảng JSON các phần tử `["A", "B", ...]`. Giữ nguyên hậu tố size nếu tên sản phẩm gốc có size (vd: 'Trà đào (L)').
-   - `table`: Khi hỏi Top N KÈM số tiền/doanh thu/công nợ: bắt buộc trả về `{"columns": ["khach_hang", "so_tien_no"], "rows": [["Tên Khách A", 1000], ...]}`. Lưu ý: cột khách hàng phải là Tên khách hàng (nếu có), không phải mã KHxxxx.
+   - `table`: Khi hỏi Top N KÈM số tiền/doanh thu/công nợ (hoặc hỏi mỗi người/từng người còn nợ bao nhiêu): bắt buộc trả về `{"columns": ["khach_hang", "so_tien_no"], "rows": [["Tên Khách A", 1000], ...]}`. Lưu ý: cột khách hàng phải là Tên khách hàng (chuỗi tên người), không phải mã KHxxxx.
    - `number`, `percent`, `date`, `boolean`: `{"type": "<kiểu>", "answer": <giá_trị>}` (với percent: answer là số thực ví dụ 40.3 chứ KHÔNG PHẢI 0.403).
    - `unanswerable`: `{"type": "unanswerable", "reason": "..."}`.
 11. Chỉ trả về một khối mã ```python ... ``` duy nhất, không giải thích dài dòng."""

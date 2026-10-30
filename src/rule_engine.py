@@ -184,7 +184,21 @@ class RuleEngine:
 
         # 1. Table: bảng / mỗi ... kèm số tiền / danh sách ... và doanh thu/số tiền/số lượng/công nợ
         if (
-            re.search(r"\b(?:top\s*\d+|danh\s*sách|bảng)\b.*\b(?:kèm|và)\s+(?:số\s+tiền|doanh\s+thu|số\s+lượng|số\s+nợ|tiền\s+nợ|công\s+nợ|hoa\s+hồng)", q)
+            re.search(
+                r"\b(mỗi người còn nợ bao nhiêu|mỗi người nợ bao nhiêu|mỗi người nợ bn|mỗi khách nợ bao nhiêu|"
+                r"mỗi người bao nhiêu tiền nợ|số nợ của từng người|mỗi người đang nợ bao nhiêu|"
+                r"moi nguoi con no|moi nguoi no|tung nguoi con no|moi nguoi bnhiu|"
+                r"kèm\s*(?:theo\s*)?(?:số\s*tiền\s*)?(?:còn\s*)?nợ|kèm\s*dư\s*nợ|"
+                r"kem\s*(?:theo\s*)?(?:so\s*tien\s*)?(?:con\s*)?no|kem\s*du\s*no|"
+                r"và\s*(?:số\s*tiền\s*)?(?:còn\s*)?nợ|va\s*(?:so\s*tien\s*)?(?:con\s*)?no)\b",
+                q,
+            )
+            or re.search(r"\b(?:top\s*\d+|danh\s*sách|bảng)\b.*\b(?:kèm|và)\s+(?:số\s+tiền|doanh\s+thu|số\s+lượng|số\s+nợ|tiền\s+nợ|công\s+nợ|hoa\s+hồng)", q)
+            or (
+                re.search(r"\b(?:top\s*\d+|[2-9]|10)\s+(?:khách|khach)\b", q)
+                and any(k in q for k in ["nợ nhiều nhất", "nợ nhìu nhất", "công nợ lớn nhất", "no lon nhat", "no nhieu nhat"])
+                and any(k in q for k in ["mỗi người", "từng người", "mỗi khách", "và số nợ", "số tiền nợ", "moi nguoi", "tung nguoi", "kèm", "kem"])
+            )
             or any(
                 kw in q
                 for kw in [
@@ -209,19 +223,23 @@ class RuleEngine:
             return "table"
 
         # 2. Boolean: có phải ... không, đúng hay sai, tăng liên tục, luôn cao hơn
-        if re.search(
-            r"\b(có phải|co phai|đúng không|dung khong|đúng hay sai|có hay không|co hay khong|"
-            r"tăng liên tục|tang lien tuc|giảm liên tục|giam lien tuc|luôn cao hơn|luon cao hon|"
-            r"luôn lớn hơn|luon lon hon|có lớn hơn .* không|có cao hơn .* không|có vượt .* không|"
-            r"có luôn hơn .* không|co luon hon .* khong|có tăng liên tục|co tang lien tuc|"
-            r"có luôn .* không|co luon .* khong|có giảm liên tục|co giam lien tuc)\b",
-            q,
+        if (
+            re.search(
+                r"\b(có phải|co phai|có đúng|co dung|đúng không|dung khong|phải không|phai khong|không bạn|khong ban|"
+                r"không nhỉ|khong nhi|không shop|khong shop|hay không|hay khong|liệu có|lieu co|hok|k hả|k ha|"
+                r"đúng hay sai|có hay không|co hay khong)\b",
+                q,
+            )
+            or q.endswith(" không?") or q.endswith(" khong?") or q.endswith(" k?") or q.endswith(" ko?")
+            or re.search(r"\b(?:có\s+)?(?:tăng\s+liên\s+tục|tang\s+lien\s+tuc|luôn\s+cao\s+hơn|luon\s+cao\s+hon)\s+.*(?:không|khong|k|ko|hok)", q)
         ):
-            return "boolean"
+            if not re.search(r"\b(bao nhiêu|nhiêu|mấy|may|ai|gì|gi|nào|nao)\b", q) or re.search(r"\b(?:tăng\s+liên\s+tục|tang\s+lien\s+tuc|luôn\s+cao\s+hơn)\b", q):
+                return "boolean"
 
         # 3. Percent: phần trăm, tỉ lệ, tỷ lệ, tỉ trọng, tỷ trọng, bao nhiêu %, mấy %, tăng/giảm bao nhiêu %
         # Loại trừ % nồng độ sản phẩm trong câu hỏi (ví dụ: cồn 70%, nước muối 0,9%, otrivin 0,1%, kem 5%)
-        q_no_prod_pct = re.sub(r"\b\d+[\.,]?\d*\s*%", "", q)
+        q_no_pct = re.sub(r"\b\d+(?:[\.,]\d+)?\s*%", "", q)
+        q_no_prod_pct = re.sub(r"(?:cồn|con|ruou|rượu|ethanol)\s*\d+[\.,]?\d*\s*%", "", q_no_pct)
         if (
             any(
                 kw in q
@@ -235,11 +253,23 @@ class RuleEngine:
                     "tỉ trọng",
                     "tỷ trọng",
                     "ti trong",
+                    "ty trong",
                     "tỷ số",
                     "tỉ số",
-                    "tăng hay giảm bao nhiêu %",
-                    "tăng hay giảm bao nhiêu phần trăm",
-                    "thay đổi mấy %",
+                    "tỉ lệ đơn huỷ",
+                    "tỉ lệ đơn hủy",
+                    "tỷ lệ đơn huỷ",
+                    "tỷ lệ đơn hủy",
+                    "tỉ lệ huỷ",
+                    "tỉ lệ hủy",
+                    "tỉ lệ hoàn",
+                    "tăng hay giảm bao nhiêu",
+                    "tang hay giam bao nhieu",
+                    "tăng hay giảm mấy",
+                    "tang hay giam may",
+                    "thay đổi mấy",
+                    "thay doi may",
+                    "thay đổi bao nhiêu",
                 ]
             )
             or "%" in q_no_prod_pct
@@ -258,34 +288,47 @@ class RuleEngine:
 
         # 5. List:
         # a. Hỏi 2 hoặc nhiều giá trị: "mỗi loại bao nhiêu", "lần lượt là bao nhiêu", "theo thứ tự đó", "mấy ... chẵn ... lẻ", "tuổi nợ"
-        if re.search(
-            r"\b(mỗi loại bao nhiêu|mỗi loại bn|mỗi bên bao nhiêu|mỗi bên bn|mỗi thứ bao nhiêu|mỗi thứ bn|"
-            r"lần lượt là bao nhiêu|lần lượt là bn|lần lượt theo thứ tự|theo thứ tự đó|ghi hai số|ghi 2 số|"
-            r"chẵn.*lẻ|chan.*le|hộp chẵn|vỉ chẵn|thùng chẵn|"
-            r"tuổi nợ|tuoi no)\b",
-            q,
+        # hoặc nhiều vế câu hỏi bao nhiêu, hoặc 2 doanh thu nối bằng "và" / "va"
+        if (
+            re.search(
+                r"\b(mỗi loại bao nhiêu|mỗi loại bn|mỗi bên bao nhiêu|mỗi bên bn|mỗi thứ bao nhiêu|mỗi thứ bn|"
+                r"lần lượt là bao nhiêu|lần lượt là bn|lần lượt theo thứ tự|theo thứ tự đó|"
+                r"ghi hai số|ghi 2 số|hai số|2 số|trả lời hai số|tra loi hai so|trả lời 2 số|tra loi 2 so|"
+                r"chẵn.*lẻ|chan.*le|hộp chẵn|vỉ chẵn|thùng chẵn|"
+                r"tuổi nợ|tuoi no)\b",
+                q,
+            )
+            or len(re.findall(r"\b(?:bao\s*(?:nhiêu|nhiu)|bn)\b", q)) >= 2
+            or re.search(r"(?:dthu|doanh thu|tiền|tien).*?\b(?:và|va)\b.*?(?:dthu|doanh thu|tiền|tien)", q)
         ):
             return "list"
+
         # b. Hỏi danh sách đối tượng: những ai, top N, các mặt hàng nào, liệt kê, N khách mua nhiều nhất, cho tôi N ...
-        if re.search(
-            r"\b(những .* nào|nhung .* nao|các .* nào|cac .* nao|liệt kê|liet ke|top\s*\d+|"
-            r"(?:cho\s*(?:tôi|mình|em|xin)\s+)?(?<!\d)(?:[2-9]|10)\s+(?:mặt hàng|khách hàng|khách|món|sản phẩm|thợ|nhân viên|thuốc)\b|"
-            r"bao nhiêu mỗi tháng|mỗi tháng là bao nhiêu|mấy thùng mấy|bao nhiêu thùng bao nhiêu)\b",
-            q,
+        if (
+            re.search(
+                r"\b(những .* nào|nhung .* nao|các .* nào|cac .* nao|liệt kê|liet ke|top\s*\d+|"
+                r"(?:cho\s*(?:tôi|toi|mình|minh|em|xin)\s+)?(?<!\d)(?:[2-9]|10)\s+(?:mặt hàng|mat hang|khách hàng|khach hang|khách|khach|món|mon|sản phẩm|san pham|thợ|tho|nhân viên|nhan vien|thuốc|thuoc)\b|"
+                r"bao nhiêu mỗi tháng|mỗi tháng là bao nhiêu|mấy thùng mấy|bao nhiêu thùng bao nhiêu|"
+                r"(?:hàng|thuốc|mặt hàng|sản phẩm)\s+nào\s+hết\s+hạn)\b",
+                q,
+            )
+            or bool(re.search(r"\b(?<!\d)(?:[2-9]|10)\s+(?:khách|khach|mặt hàng|mat hang|món|mon|sản phẩm|san pham|thợ|tho|nhân viên|nhan vien|thuốc|thuoc)\b", q))
         ):
-            return "list"
+            # Lưu ý: nếu hỏi số lượng mặt hàng ế ("mấy mặt hàng ế") thì là NUMBER
+            if not re.search(r"\b(?:mấy|bao nhiêu)\s+(?:mặt hàng|sản phẩm|món|loại)\s+(?:ế|ees|bán chậm|không ai mua)\b", q):
+                return "list"
 
         # Đếm số lượng mặt hàng ế / thuốc / khách ("mấy mặt hàng ế", "có bao nhiêu mặt hàng không bán được") -> Luôn là NUMBER
         if re.search(r"\b(?:mấy|bao nhiêu)\s+(?:mặt hàng|sản phẩm|món|loại)\s+(?:ế|ees|bán chậm|không ai mua)\b", q):
             return "number"
 
-        # 6. String: hỏi đích danh 1 đối tượng duy nhất (ai, hàng nào, sản phẩm nào, món nào, khách nào, ncc nào, là gì)
+        # 6. String: hỏi đích danh 1 đối tượng duy nhất (ai, hàng nào, sản phẩm nào, món nào, khách nào, ncc nào, là gì, là chi)
         if re.search(
             r"\b(ai là|ai la|ai đang|ai dang|ai trung thành|ai sộp|ai hay|ai được|ai bán|ai mua|ai có|ai chi|là ai|la ai|"
             r"mặt hàng nào|mat hang nao|hàng nào|hang nao|sản phẩm nào|san pham nao|món nào|mon nao|"
             r"khách hàng nào|khach hang nao|khách nào|khach nao|nhà cung cấp nào|ncc nào|nhân viên nào|thợ nào|tho nao|"
             r"lô nào|lo nao|nhóm nào|kênh nào|hình thức nào|chi nhánh nào|thứ mấy|thu may|hàng hot nhất|mặt hàng hot nhất|"
-            r"là gì|la gi)\b",
+            r"là gì|la gi|là chi|la chi)\b",
             q,
         ):
             # Tránh nhầm "bán được mấy ... là gì"

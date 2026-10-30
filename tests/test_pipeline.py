@@ -26,7 +26,7 @@ from src.ingest import (
     CANONICAL_STATUS_MAP,
     ORDER_STATUS_COL_NAMES,
 )
-from src.postprocess import postprocess_and_guard
+from src.postprocess import postprocess_and_guard, strip_trailing_measurement_in_parens
 from src.rule_engine import RuleEngine
 from src.sandbox import PythonSandbox
 
@@ -466,3 +466,41 @@ def test_hqua_date_resolution_and_unanswerable_inventory():
     assert engine.infer_expected_type("xét 3 tháng 3/2025, 4/2025 và 5/2025, doanh thu tháng naof lớn nhất") == "date"
     assert engine.infer_expected_type("tháng 2/2025 mặt hàng naof lời nhất") == "string"
     assert engine.infer_expected_type("Giai đoạn từ 05/07/2025 đến hết 11/07/2025, cửa hàng có mấy mặt hàng ế hẳn") == "number"
+
+
+def test_parens_strip_strict_abstention_and_type_inference():
+    # 1. Kiểm tra strip_trailing_measurement_in_parens
+    assert strip_trailing_measurement_in_parens("Bia Tiger lon (256)") == "Bia Tiger lon"
+    assert strip_trailing_measurement_in_parens("Mì Hảo Hảo tôm chua cay (1507)") == "Mì Hảo Hảo tôm chua cay"
+    assert strip_trailing_measurement_in_parens("Xi măng Hà Tiên PCB40 bao 50kg (193)") == "Xi măng Hà Tiên PCB40 bao 50kg"
+    assert strip_trailing_measurement_in_parens("Trà đào cam sả (L)") == "Trà đào cam sả (L)"
+    assert strip_trailing_measurement_in_parens("Trà đào (M)") == "Trà đào (M)"
+    assert strip_trailing_measurement_in_parens("Panadol (500mg)") == "Panadol (500mg)"
+    assert strip_trailing_measurement_in_parens("KH0014 (1,605,000)") == "KH0014"
+
+    # 2. Kiểm tra type inference mở rộng cho list không dấu và câu hỏi 2 vế
+    engine = RuleEngine(rulebook_path=RULEBOOK_PATH)
+    assert engine.infer_expected_type("cho toi 3 khach mua nhieu tien nhat thang 5/2025") == "list"
+    assert engine.infer_expected_type("5 khach co tong tien mua cao nhat tuan roi la ai") == "list"
+    assert engine.infer_expected_type("Tháng 7/2025, Võ Thảo Khánh ghi nợ thêm bao nhiêu tiền và đã trả nợ được bao nhiêu?") == "list"
+    assert engine.infer_expected_type("Cho hỏi tháng này, doanh thu các đơn bán qua điện thoại là bao nhiêu, doanh thu các đơn bán tại quầy là bao nhiêu?") == "list"
+    assert engine.infer_expected_type("cho toi dthu cac don ban tai quay va doanh thu cac don ban qua zalo oa thang 9/2025") == "list"
+    assert engine.infer_expected_type("tinh den het ngay 14/09/2026, 5 khach nao dang no nhiu nhat, moi nguoi con no bnhiu ha") == "table"
+    assert engine.infer_expected_type("check giùm sp bán dc nhieeuf nhất trong tháng 5 năm 2026 là chi") == "string"
+
+    # 3. Kiểm tra cơ chế Abstention Guard nghiêm ngặt
+    # Percent tăng trưởng dị thường > 300% hoặc < -100% -> Abstain
+    res_wild_pct = postprocess_and_guard("q_test_pct", "Doanh thu tăng bao nhiêu %?", 109410300000, "percent")
+    assert res_wild_pct["type"] == "abstain"
+
+    res_neg_pct = postprocess_and_guard("q_test_pct2", "Doanh thu tăng bao nhiêu %?", -250.0, "percent")
+    assert res_neg_pct["type"] == "abstain"
+
+    # Số lượng bị sum thành tiền (> 20000 cho câu hỏi số kg) -> Abstain
+    res_wild_kg = postprocess_and_guard("q_test_kg", "Số kg Nếp cái hoa vàng bán đc trong tháng 8/2025 là bao nhiêu?", 139998800, "number")
+    assert res_wild_kg["type"] == "abstain"
+
+    # Chuỗi chứa Khách lẻ cho câu hỏi xếp hạng string -> Abstain
+    res_khach_le = postprocess_and_guard("q_test_kh", "Ai mua nhiều tiền nhất?", "Khách lẻ", "string")
+    assert res_khach_le["type"] == "abstain"
+

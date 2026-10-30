@@ -133,7 +133,7 @@ def normalize_date_str(val: Any) -> Optional[str]:
 def strip_trailing_measurement_in_parens(s: str) -> str:
     """
     Chỉ loại bỏ ngoặc đơn nếu bên trong là số tiền, số lượng hoặc số đo do LLM tự ghi chú thêm
-    (ví dụ: " (1.605.000)", " (307 ly)", " (15 chai)", " (50 đ)").
+    (ví dụ: " (1.605.000)", " (307 ly)", " (15 chai)", " (50 đ)", " (256)", " (1507)").
     TUYỆT ĐỐI KHÔNG BỎ hậu tố size/liều lượng/quy cách là một phần của tên sản phẩm:
     (M), (L), (S), (XL), (chai 500ml), (hộp 24 gói), (500mg), v.v.
     """
@@ -143,12 +143,15 @@ def strip_trailing_measurement_in_parens(s: str) -> str:
     if not m:
         return s.strip()
     inside = m.group(1).strip()
-    # Nếu là size ngắn (M, L, S, XL, XXL) hoặc quy cách sản phẩm (500mg, 100ml, v.v.), giữ nguyên
-    if re.match(r"^[a-zA-Z0-9\s]{1,4}$", inside) or re.search(r"(?:mg|ml|kg|gam|g|hộp|vỉ|chai|gói)\s*\d*", inside, re.I):
-        return s.strip()
-    # Nếu chứa số tiền hoặc số lượng kèm đơn vị (1.000đ, 307 ly, 10 cái), loại bỏ
-    if re.search(r"[\d\.,\s]+(?:đ|vnđ|đồng|ly|chai|nồi|hộp|lon|cái|kg|g|%|bill|đơn|k|cuộn)", inside, re.I) or re.match(r"^[\d\.,\s]+$", inside):
+    # 1. Nếu bên trong là số thuần túy (ví dụ: (256), (1507), (193), (1.605.000)) -> chắc chắn là số đo/số lượng do LLM tự chú thích thêm -> LOẠI BỎ
+    if re.match(r"^[\d\.,\s]+$", inside):
         return s[:m.start()].strip()
+    # 2. Nếu chứa số tiền hoặc số lượng kèm đơn vị (1.000đ, 307 ly, 10 cái, 15 chai) -> LOẠI BỎ
+    if re.search(r"[\d\.,\s]+(?:đ|vnđ|đồng|ly|chai|nồi|hộp|lon|cái|kg|g|%|bill|đơn|k|cuộn)", inside, re.I):
+        return s[:m.start()].strip()
+    # 3. Nếu là size ngắn thuần chữ cái (M, L, S, XL, XXL) hoặc quy cách sản phẩm (500mg, 100ml, v.v.), GIỮ NGUYÊN
+    if re.match(r"^[a-zA-Z\s]{1,3}$", inside) or re.search(r"(?:mg|ml|kg|gam|g|hộp|vỉ|chai|gói)\s*\d*", inside, re.I):
+        return s.strip()
     return s.strip()
 
 
@@ -218,6 +221,10 @@ def postprocess_and_guard(
         if is_Strictly_non_negative_question(question) and float(ans_val) < 0:
             return abstain_resp
 
+        # Sanity check: Các câu hỏi doanh thu, số lượng, số đơn, tiền nợ không bao giờ âm nếu không phải câu hỏi chênh lệch
+        if float(ans_val) < 0 and not any(k in q_low for k in CHANGE_OR_DIFF_KEYWORDS):
+            return abstain_resp
+
         if is_money_question(question) or float(ans_val).is_integer():
             final_num: Any = round_half_up_int(float(ans_val))
         else:
@@ -225,7 +232,7 @@ def postprocess_and_guard(
 
         # Sanity Guard 1: Nhầm số lượng thành doanh thu
         # Câu hỏi hỏi số lượng sản phẩm/nồi/đĩa/kg/ly/chai/hộp/lon mà kết quả > 20,000 (do model sum Thành tiền)
-        if any(k in q_low for k in ["mấy nồi", "mấy đĩa", "mấy ly", "mấy lon", "mấy kg", "mấy chai", "mấy hộp", "may noi", "may dia", "may ly", "may lon", "may kg", "may chai", "may hop", "bao nhiêu nồi", "bao nhiêu đĩa", "bao nhiêu ly", "bao nhiêu lon", "bao nhiêu kg", "bao nhiêu chai", "bao nhiêu hộp", "số lượng"]) and not any(k in q_low for k in ["tiền", "đồng", "doanh thu", "dthu", "giá"]):
+        if any(k in q_low for k in ["mấy nồi", "mấy đĩa", "mấy ly", "mấy lon", "mấy kg", "mấy chai", "mấy hộp", "may noi", "may dia", "may ly", "may lon", "may kg", "may chai", "may hop", "bao nhiêu nồi", "bao nhiêu đĩa", "bao nhiêu ly", "bao nhiêu lon", "bao nhiêu kg", "bao nhiêu chai", "bao nhiêu hộp", "số lượng", "số kg", "so kg", "số lượng kg", "số lon", "so lon", "số chai", "so chai", "số hộp", "so hop", "số gói", "so goi", "số cái", "so cai", "số đĩa", "so dia", "số nồi", "so noi"]) and not any(k in q_low for k in ["tiền", "đồng", "doanh thu", "dthu", "giá"]):
             if final_num > 20000:
                 return abstain_resp
 
@@ -256,8 +263,8 @@ def postprocess_and_guard(
         if math.isnan(ans_val) or math.isinf(ans_val):
             return abstain_resp
 
-        # Sanity check: tỉ lệ phần trăm không thể < -100% (trừ tăng trưởng giảm tối đa 100%)
-        if float(ans_val) < -100.0:
+        # Sanity check: tỉ lệ phần trăm không thể < -100% hoặc vượt quá 300% (tăng trưởng doanh thu bán lẻ tháng)
+        if float(ans_val) < -100.0 or abs(float(ans_val)) > 300.0:
             return abstain_resp
 
         # Tự động quy đổi tỷ số thập phân nếu model trả về dạng tỷ lệ 0 < val < 1.0 (vd: 0.403 cho 40.3%, 0.3517 cho 35.17%)
@@ -297,9 +304,14 @@ def postprocess_and_guard(
             return abstain_resp
         clean_str = unicodedata.normalize("NFC", ans_val).strip()
 
-        # Nếu model trả về chuỗi ghép nhiều đối tượng bằng dấu phẩy mà câu hỏi hỏi danh sách/top N
+        # Nếu model trả về chuỗi ghép nhiều đối tượng bằng dấu phẩy mà câu hỏi hỏi danh sách/top N/nhiều đối tượng
         # -> Tự động chuyển đổi thành type "list" chuẩn JSON
-        if "," in clean_str and (expected_type == "list" or any(kw in question.lower() for kw in ["top", "danh sách", "liệt kê", "các", "những"])):
+        is_list_q = (
+            expected_type == "list"
+            or any(kw in question.lower() for kw in ["top", "danh sách", "liệt kê", "các", "những", "cac", "nhung", "liet ke"])
+            or bool(re.search(r"\b(?<!\d)(?:[2-9]|10)\s+(?:khách|khach|mặt hàng|mat hang|món|mon|sản phẩm|san pham|thợ|tho|nhân viên|nhan vien|thuốc|thuoc)\b", question.lower()))
+        )
+        if "," in clean_str and is_list_q:
             parts = [
                 strip_trailing_measurement_in_parens(unicodedata.normalize("NFC", p)).strip()
                 for p in clean_str.split(",")

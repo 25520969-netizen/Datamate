@@ -171,7 +171,7 @@ class DateResolver:
         q_lower = question.lower()
         detected: List[Dict[str, str]] = []
 
-        # 0. Phát hiện phương ngữ Hôm nay / Hôm qua / Tuần này / Tuần trước
+        # 0. Phát hiện phương ngữ Hôm nay / Hôm qua / Hôm kia / Tuần này / Tuần trước / Tháng này / Tháng trước / Năm nay / Năm ngoái
         if re.search(r"\b(hôm\s*nay|hom\s*nay|hnay|hôm\s*ni|hom\s*ni|bữa\s*nay|bua\s*nay|bữa\s*ni|bua\s*ni)\b", q_lower):
             detected.append(
                 {
@@ -192,7 +192,18 @@ class DateResolver:
                 }
             )
 
-        if re.search(r"\b(tuần\s*(?:trước|rồi|vừa\s*qua)|tuan\s*(?:truoc|roi|vua\s*qua))\b", q_lower):
+        if re.search(r"\b(hôm\s*kia|hom\s*kia)\b", q_lower):
+            day_before_yesterday = today - timedelta(days=2)
+            detected.append(
+                {
+                    "expr": "Hôm kia (2 ngày trước)",
+                    "start_date": day_before_yesterday.isoformat(),
+                    "end_date": day_before_yesterday.isoformat(),
+                    "note": f"Ngày hôm kia ({day_before_yesterday.isoformat()})",
+                }
+            )
+
+        if re.search(r"\b(tuần\s*(?:trước|trc|rồi|vừa\s*qua)|tuan\s*(?:truoc|trc|roi|vua\s*qua))\b", q_lower):
             detected.append(
                 {
                     "expr": "Tuần trước / tuần rồi",
@@ -202,7 +213,7 @@ class DateResolver:
                 }
             )
 
-        if re.search(r"\b(tuần\s*này|tuan\s*nay)\b", q_lower):
+        if re.search(r"\b(tuần\s*(?:này|nay|nayf)|tuan\s*(?:nay|nayf))\b", q_lower):
             detected.append(
                 {
                     "expr": "Tuần này",
@@ -212,8 +223,49 @@ class DateResolver:
                 }
             )
 
-        # 1. Phát hiện N ngày gần nhất / N ngày qua
-        for m in re.finditer(r"(\d+)\s*ngày\s*(?:gần\s*nhất|gần\s*đây|qua|vừa\s*qua)", q_lower):
+        if re.search(r"\b(tháng\s*(?:này|nay|nayf|hiện\s*tại)|thang\s*(?:nay|nayf|hien\s*tai)|thg\s*nay|th\s*nay)\b", q_lower):
+            detected.append(
+                {
+                    "expr": "Tháng này (từ đầu tháng đến hôm nay)",
+                    "start_date": this_month_start.isoformat(),
+                    "end_date": this_month_end.isoformat(),
+                    "note": f"Từ đầu tháng ({this_month_start.isoformat()}) đến hết hôm nay ({this_month_end.isoformat()})",
+                }
+            )
+
+        if re.search(r"\b(tháng\s*(?:trước|trc|rồi)|thang\s*(?:truoc|trc|roi)|thg\s*trc|th\s*trc)\b", q_lower):
+            if not re.search(r"\b(so\s*với\s*tháng|so\s*vs\s*tháng|so\s*tháng|so\s*vs\s*th)\b", q_lower):
+                detected.append(
+                    {
+                        "expr": "Tháng trước (cả tháng)",
+                        "start_date": prev_month_full_start.isoformat(),
+                        "end_date": prev_month_full_end.isoformat(),
+                        "note": f"Toàn bộ tháng liền trước ({prev_month_full_start.isoformat()} đến {prev_month_full_end.isoformat()})",
+                    }
+                )
+
+        if re.search(r"\b(năm\s*nay|nam\s*nay)\b", q_lower):
+            detected.append(
+                {
+                    "expr": "Từ đầu năm nay tới nay",
+                    "start_date": ytd_start.isoformat(),
+                    "end_date": today.isoformat(),
+                    "note": f"Từ đầu năm ({ytd_start.isoformat()}) đến hết hôm nay ({today.isoformat()})",
+                }
+            )
+        elif re.search(r"\b(năm\s*ngoái|nam\s*ngoai|năm\s*(?:trước|trc)|nam\s*(?:truoc|trc))\b", q_lower):
+            prev_y = today.year - 1
+            detected.append(
+                {
+                    "expr": f"Cả năm ngoái ({prev_y})",
+                    "start_date": f"{prev_y}-01-01",
+                    "end_date": f"{prev_y}-12-31",
+                    "note": f"Toàn bộ năm {prev_y}",
+                }
+            )
+
+        # 1. Phát hiện N ngày gần nhất / N ngày qua (kể cả không dấu hoặc gõ Telex: 7 ngay gan nhat, 30 ngay qua)
+        for m in re.finditer(r"(\d+)\s*(?:ngày|ngay)\s*(?:gần\s*nhất|gan\s*nhat|gần\s*đây|gan\s*day|qua|vừa\s*qua|vua\s*qua|gaanf\s*nhất)", q_lower):
             n_days = int(m.group(1))
             if n_days > 0:
                 s_dt = today - timedelta(days=n_days - 1)
@@ -256,7 +308,7 @@ class DateResolver:
                 pass
 
         # 4. Phát hiện tháng M/YYYY hoặc M/YY (bao gồm thM/YYYY, tM/YY, tháng M/YYYY, ví dụ: th6/2025, 3/25, t5/2026; loại trừ quý M/YYYY)
-        for m in re.finditer(r"(?<!quý\s)(?<!quy\s)(?<!quý)(?<!quy)\b(?:tháng|thang|th|t)?\s*(\d{1,2})[/-](20\d{2}|\d{2})\b", q_lower):
+        for m in re.finditer(r"(?<!quý\s)(?<!quy\s)(?<!quý)(?<!quy)\b(?:tháng|thang|thangs|thg|th|t)?\s*(\d{1,2})[/-](20\d{2}|\d{2})\b", q_lower):
             m_val = int(m.group(1))
             y_val = int(m.group(2))
             if y_val < 100:
@@ -273,8 +325,26 @@ class DateResolver:
                     }
                 )
 
-        # 5. Phát hiện tháng M không ghi năm ("tháng M" không theo sau bởi /YYYY hoặc /YY)
-        for m in re.finditer(r"\b(?:tháng|thang|th|t)\s*(\d{1,2})(?![/\-\d])\b", q_lower):
+        # 4b. Phát hiện tháng M năm YYYY (ví dụ: thangs 6 năm 2025, tháng 5 năm 2026, thang 10 nam 2025)
+        for m in re.finditer(r"(?<!quý\s)(?<!quy\s)(?<!quý)(?<!quy)\b(?:tháng|thang|thangs|thg|th|t)\s*(\d{1,2})\s*(?:năm|nam)\s*(20\d{2})\b", q_lower):
+            m_val = int(m.group(1))
+            y_val = int(m.group(2))
+            if 1 <= m_val <= 12 and 2020 <= y_val <= 2035:
+                s_dt, e_dt = self.get_month_range(y_val, m_val)
+                ym_str = f"{y_val:04d}-{m_val:02d}"
+                if not any(d.get("year_month") == ym_str for d in detected):
+                    detected.append(
+                        {
+                            "expr": m.group(0).strip(),
+                            "start_date": s_dt.isoformat(),
+                            "end_date": e_dt.isoformat(),
+                            "year_month": ym_str,
+                            "note": f"Cả tháng {m_val:02d}/{y_val}",
+                        }
+                    )
+
+        # 5. Phát hiện tháng M không ghi năm ("tháng M" không theo sau bởi /YYYY, /YY hoặc năm YYYY)
+        for m in re.finditer(r"\b(?:tháng|thang|thangs|thg|th|t)\s*(\d{1,2})(?![/\-\d])(?!\s*(?:năm|nam)\s*\d{4})\b", q_lower):
             m_val = int(m.group(1))
             if 1 <= m_val <= 12:
                 # Mục 2 Rulebook: của năm nay nếu không sau hôm nay; sau hôm nay thì của năm trước
@@ -282,15 +352,17 @@ class DateResolver:
                 s_dt, e_dt = self.get_month_range(candidate_year, m_val)
                 if candidate_year == today.year and m_val == today.month:
                     e_dt = today
-                detected.append(
-                    {
-                        "expr": m.group(0),
-                        "start_date": s_dt.isoformat(),
-                        "end_date": e_dt.isoformat(),
-                        "year_month": f"{candidate_year:04d}-{m_val:02d}",
-                        "note": f"Tháng {m_val} không ghi năm -> {m_val:02d}/{candidate_year}",
-                    }
-                )
+                ym_str = f"{candidate_year:04d}-{m_val:02d}"
+                if not any(d.get("year_month") == ym_str for d in detected):
+                    detected.append(
+                        {
+                            "expr": m.group(0),
+                            "start_date": s_dt.isoformat(),
+                            "end_date": e_dt.isoformat(),
+                            "year_month": ym_str,
+                            "note": f"Tháng {m_val} không ghi năm -> {m_val:02d}/{candidate_year}",
+                        }
+                    )
 
         # 6. Phát hiện Quý Q/YYYY hoặc Quý Q không ghi năm
         for m in re.finditer(r"(?:quý|quy)\s*([1-4])(?:[/-](20\d{2})|\s+năm\s+(20\d{2}))?", q_lower):

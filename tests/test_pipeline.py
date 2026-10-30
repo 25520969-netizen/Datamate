@@ -449,3 +449,20 @@ def test_hqua_date_resolution_and_unanswerable_inventory():
     )
     assert is_unans is True
     assert "tồn kho" in reason.lower()
+
+    # Kiểm tra giải quyết thời gian mở rộng (tháng M năm YYYY, tháng này, N ngày gần nhất không dấu)
+    ctx_thang_nam = resolver.resolve("dthu cuar Sữa tươi trân châu đường đen (L) trong thangs 6 năm 2025 là bao nhiêu", "2026-06-02")
+    det_thang_nam = ctx_thang_nam.get("detected_periods", [])
+    assert any(d.get("year_month") == "2025-06" for d in det_thang_nam)
+
+    ctx_thang_nay = resolver.resolve("tháng này tổng giá trị các phiếu nhập hàng là bao nhiu", "2026-09-07")
+    det_thang_nay = ctx_thang_nay.get("detected_periods", [])
+    assert any("tháng này" in d.get("expr", "").lower() for d in det_thang_nay)
+
+    # Kiểm tra suy đoán type mở rộng
+    assert engine.infer_expected_type("tháng 5/2026 cửa hàng có nhiêu % đơn bị huỷ") == "percent"
+    assert engine.infer_expected_type("tháng này, dthu các đơn trả bằng cod và các đơn trả bằng tm mỗi loại bao nhiêu") == "list"
+    assert engine.infer_expected_type("Cuối ngày hôm nay Bánh croissant còn mấy hộp chẵn, mấy cái lẻ?") == "list"
+    assert engine.infer_expected_type("xét 3 tháng 3/2025, 4/2025 và 5/2025, doanh thu tháng naof lớn nhất") == "date"
+    assert engine.infer_expected_type("tháng 2/2025 mặt hàng naof lời nhất") == "string"
+    assert engine.infer_expected_type("Giai đoạn từ 05/07/2025 đến hết 11/07/2025, cửa hàng có mấy mặt hàng ế hẳn") == "number"

@@ -1,5 +1,7 @@
 # Ignored datasets and temporary files
 train/
+train_preprocessed/
+train_preprocessed_full/
 public_test/
 .cache/
 .pytest_cache/

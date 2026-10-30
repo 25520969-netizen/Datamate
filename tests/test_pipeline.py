@@ -504,3 +504,52 @@ def test_parens_strip_strict_abstention_and_type_inference():
     res_khach_le = postprocess_and_guard("q_test_kh", "Ai mua nhiều tiền nhất?", "Khách lẻ", "string")
     assert res_khach_le["type"] == "abstain"
 
+
+def test_status_alias_date_filtering_and_denormalization():
+    # 1. Kiểm tra postprocess_and_guard cho boolean chuỗi và dict
+    assert postprocess_and_guard("q_b1", "Doanh thu có tăng không?", "True", "boolean")["answer"] is True
+    assert postprocess_and_guard("q_b2", "Doanh thu có tăng không?", "False", "boolean")["answer"] is False
+    assert postprocess_and_guard("q_b3", "Doanh thu có tăng không?", "đúng", "boolean")["answer"] is True
+    assert postprocess_and_guard("q_b4", "Doanh thu có tăng không?", "sai", "boolean")["answer"] is False
+    assert postprocess_and_guard("q_b5", "Doanh thu có tăng không?", {"answer": True}, "boolean")["answer"] is True
+    assert postprocess_and_guard("q_b6", "Doanh thu có tăng không?", {"result": False}, "boolean")["answer"] is False
+
+    # 2. Kiểm tra alias Trạng thái và Ngày trên các shop thực tế
+    store = BusinessDataStore(data_root=DATA_ROOT)
+
+    # biz_113 (trước đây chỉ có 'Ghi chú TT')
+    t_113 = store.load_tables("biz_113", use_cache=True)
+    assert "Trạng thái" in t_113["SoBanHang"].columns
+    assert "Ngày" in t_113["SoBanHang"].columns
+
+    # biz_125 & biz_126: Bộ lọc không làm mất đơn 'Hoàn thành'
+    t_125 = store.load_tables("biz_125", use_cache=True)
+    df_125 = t_125["ban_hang"]
+    assert "Trạng thái" in df_125.columns
+    valid_125 = df_125[~df_125["Trạng thái"].astype(str).str.lower().str.contains("hủy|huỷ|trả|cancel|return", regex=True)]
+    assert (valid_125["Trạng thái"] == "Hoàn thành").sum() > 70000
+
+    t_126 = store.load_tables("biz_126", use_cache=True)
+    df_126 = t_126["SoBanHang"]
+    assert "Trạng thái" in df_126.columns
+    valid_126 = df_126[~df_126["Trạng thái"].astype(str).str.lower().str.contains("hủy|huỷ|trả|cancel|return", regex=True)]
+    assert (valid_126["Trạng thái"] == "Hoàn thành").sum() > 60000
+
+    # biz_111: Denormalization chi_tiet_don + don_hang + san_pham
+    t_111 = store.load_tables("biz_111", use_cache=True)
+    ct_111 = t_111["chi_tiet_don"]
+    assert "Trạng thái" in ct_111.columns
+    assert "Ngày" in ct_111.columns
+    assert "Tên sản phẩm" in ct_111.columns
+
+    # 3. Kiểm tra DuckDB truy vấn ngày ISO chuẩn xác
+    import duckdb
+    con = duckdb.connect()
+    con.register("SoBanHang_113", t_113["SoBanHang"])
+    res = con.execute("""
+        SELECT count(*) FROM SoBanHang_113
+        WHERE CAST("Ngày" AS VARCHAR) BETWEEN '2026-06-01' AND '2026-06-30'
+    """).fetchone()
+    assert res[0] > 0
+
+

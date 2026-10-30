@@ -300,7 +300,7 @@ _VN_TEXT_DATE_RE = re.compile(
 )
 _EXCEL_SERIAL_RE = re.compile(r"^\d{5}(?:\.\d+)?$")
 _ISO_MIDNIGHT_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})[T\s]+00:00(?::00)?(?:\.0+)?$")
-CACHE_VERSION = "v6"
+CACHE_VERSION = "v7"
 
 
 def parse_vn_numeric_value(val: Any, is_qty_col: bool = False) -> Optional[float]:
@@ -950,12 +950,23 @@ class BusinessDataStore:
         # Áp dụng chuẩn hóa ngày đặt (min date của đơn) và trạng thái 'Trả hàng' cho các đơn trong returned_order_ids
         order_date_col_candidates = ("Ngày giao dịch", "Ngày lập", "Ngày đặt hàng", "Ngày bán", "Ngày", "ngay_ban", "Thời gian", "Ngày mua")
         for tbl_name, df in tables.items():
-            # Tạo alias cột ngày chuẩn ('Ngày', 'Ngày đặt hàng', 'Thời gian') trên mọi bảng có cột ngày
-            dt_found = next((c for c in df.columns if any(k in c.lower() for k in ["ngày", "thời gian", "ngay", "date"])), None)
+            # Tạo alias cột ngày chuẩn ('Ngày', 'Ngày đặt hàng', 'Thời gian') trên mọi bảng có cột ngày giao dịch thật
+            dt_found = next(
+                (c for c in df.columns if any(k in c.lower() for k in ["ngày", "thời gian", "ngay", "date"]) and not any(k in c.lower() for k in ["sinh", "hạn", "số ngày", "so_ngay", "tuổi"])),
+                None
+            )
             if dt_found:
                 for alias in ("Ngày", "Ngày đặt hàng", "Thời gian"):
                     if alias not in df.columns:
                         df[alias] = df[dt_found]
+
+            # Tạo alias cột trạng thái chuẩn ('Trạng thái') trên mọi bảng có cột trạng thái
+            st_found = next(
+                (c for c in df.columns if c.lower().strip() in ORDER_STATUS_COL_NAMES or any(c.lower().strip().startswith(p) for p in ["trạng thái", "trang thai", "tt đơn", "tình trạng", "ghi chú tt"])),
+                None
+            )
+            if st_found and "Trạng thái" not in df.columns:
+                df["Trạng thái"] = df[st_found]
 
             ord_col = next((c for c in df.columns if c in all_order_id_cols), None)
             if not ord_col:
@@ -1063,6 +1074,58 @@ class BusinessDataStore:
                         for col_to_copy in (sku_col, "Hoạt chất", "Thuốc kê đơn"):
                             if col_to_copy in sp_by_name.columns and col_to_copy not in dh_df.columns:
                                 dh_df[col_to_copy] = dh_df[pname_col].map(sp_by_name[col_to_copy])
+
+        # 3e. chi_tiet_don + don_hang + san_pham + khach_hang (biz_111, biz_123, biz_127, biz_129)
+        if "chi_tiet_don" in tables and "don_hang" in tables:
+            ct_df = tables["chi_tiet_don"]
+            dh_df = tables["don_hang"]
+
+            dh_ord_col = next((c for c in ("Mã chứng từ", "MaHoaDon", "Mã đơn hàng", "Số phiếu", "Mã giao dịch") if c in dh_df.columns), None)
+            ct_ord_col = next((c for c in ("Ma don", "MaHoaDon", "Mã đơn hàng", "Số CT", "Mã giao dịch") if c in ct_df.columns), None)
+
+            if dh_ord_col and ct_ord_col:
+                dh_dedup = dh_df.drop_duplicates(subset=[dh_ord_col]).set_index(dh_ord_col)
+                for src_col, target_col in [
+                    ("Ngày", "Ngày"),
+                    ("Trạng thái", "Trạng thái"),
+                    ("Phương thức TT", "Phương thức TT"),
+                    ("Kênh bán", "Kênh bán"),
+                    ("Bán qua", "Kênh bán"),
+                    ("KenhBanHang", "Kênh bán"),
+                    ("Loại bán", "Kênh bán"),
+                    ("Hình thức thanh toán", "Phương thức TT"),
+                ]:
+                    if src_col in dh_dedup.columns and target_col not in ct_df.columns:
+                        ct_df[target_col] = ct_df[ct_ord_col].map(dh_dedup[src_col])
+
+                dh_cust_col = next((c for c in ("Số KH", "MaKhachHang", "Customer ID", "Mã khách mua", "Mã KH") if c in dh_dedup.columns), None)
+                if dh_cust_col and "Mã KH" not in ct_df.columns:
+                    ct_df["Mã KH"] = ct_df[ct_ord_col].map(dh_dedup[dh_cust_col])
+
+                if "khach_hang" in tables:
+                    kh_df = tables["khach_hang"]
+                    kh_id_col = next((c for c in ("ma_kh", "MaKhachHang", "Mã KH", "Mã khách lẻ/sỉ") if c in kh_df.columns), None)
+                    kh_name_col = next((c for c in ("Khách lẻ/sỉ", "TenGoi", "Khách hàng (tên)", "Tên công ty", "KH", "Tên khách hàng") if c in kh_df.columns), None)
+                    if kh_id_col and kh_name_col and "Mã KH" in ct_df.columns and "Tên KH" not in ct_df.columns:
+                        kh_map = kh_df.drop_duplicates(subset=[kh_id_col]).set_index(kh_id_col)[kh_name_col]
+                        ct_df["Tên KH"] = ct_df["Mã KH"].map(kh_map)
+                        if "Tên KH" not in dh_df.columns and dh_cust_col:
+                            dh_df["Tên KH"] = dh_df[dh_cust_col].map(kh_map)
+
+            if "san_pham" in tables:
+                sp_df = tables["san_pham"]
+                sp_id_col = next((c for c in ("SKU", "MaHangHoa", "Mã sản phẩm bán", "Mã HH", "Mã hàng") if c in sp_df.columns), None)
+                ct_prod_col = next((c for c in ("ID SP", "MaHangHoa", "Mã mặt hàng", "Mã hàng bán", "Mã hàng") if c in ct_df.columns), None)
+                sp_name_col = next((c for c in ("Sản phẩm", "TenGoi", "Tên SP", "Tên sản phẩm", "Tên hàng") if c in sp_df.columns), None)
+                if sp_id_col and ct_prod_col and sp_name_col:
+                    sp_dedup = sp_df.drop_duplicates(subset=[sp_id_col]).set_index(sp_id_col)
+                    if "Tên sản phẩm" not in ct_df.columns:
+                        ct_df["Tên sản phẩm"] = ct_df[ct_prod_col].map(sp_dedup[sp_name_col])
+                    if "Tên hàng" not in ct_df.columns:
+                        ct_df["Tên hàng"] = ct_df["Tên sản phẩm"]
+                    for col_to_copy in ("Hoạt chất", "Thuốc kê đơn", "Kê đơn", "Nhom hang", "DanhMuc"):
+                        if col_to_copy in sp_dedup.columns and col_to_copy not in ct_df.columns:
+                            ct_df[col_to_copy] = ct_df[ct_prod_col].map(sp_dedup[col_to_copy])
 
         return tables
 

@@ -17,7 +17,7 @@ vllm = subprocess.Popen([
     "python3", "-m", "vllm.entrypoints.openai.api_server",
     "--model", "Qwen/Qwen2.5-Coder-7B-Instruct",
     "--port", "8000",
-    "--max-model-len", "4096",
+    "--max-model-len", "8192",
     "--gpu-memory-utilization", "0.90",
     "--enable-prefix-caching",
     "--enforce-eager"

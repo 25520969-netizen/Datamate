@@ -175,16 +175,17 @@ def postprocess_and_guard(
     ans_val = raw_output
     reason_val: Optional[str] = None
 
-    if isinstance(raw_output, dict) and "type" in raw_output:
-        ans_type = str(raw_output.get("type", "")).strip().lower()
-        ans_val = raw_output.get("answer")
-        if ans_val is None:
-            if "columns" in raw_output and "rows" in raw_output:
-                ans_val = {"columns": raw_output["columns"], "rows": raw_output["rows"]}
-            elif "value" in raw_output:
-                ans_val = raw_output["value"]
-            elif "result" in raw_output:
-                ans_val = raw_output["result"]
+    if isinstance(raw_output, dict):
+        if "type" in raw_output:
+            ans_type = str(raw_output.get("type", "")).strip().lower()
+        if "answer" in raw_output:
+            ans_val = raw_output["answer"]
+        elif "columns" in raw_output and "rows" in raw_output:
+            ans_val = {"columns": raw_output["columns"], "rows": raw_output["rows"]}
+        elif "value" in raw_output:
+            ans_val = raw_output["value"]
+        elif "result" in raw_output:
+            ans_val = raw_output["result"]
         if "reason" in raw_output and isinstance(raw_output["reason"], str):
             reason_val = raw_output["reason"]
 
@@ -294,6 +295,18 @@ def postprocess_and_guard(
 
     # 4. Xử lý BOOLEAN
     if ans_type == "boolean":
+        if isinstance(ans_val, str):
+            s_val = unicodedata.normalize("NFC", ans_val).strip().lower()
+            if s_val in ("true", "đúng", "dung", "có", "co", "tăng", "tang", "cao hơn", "cao hon"):
+                ans_val = True
+            elif s_val in ("false", "sai", "không", "khong", "ko", "k", "giảm", "giam", "thấp hơn", "thap hon"):
+                ans_val = False
+        elif isinstance(ans_val, (int, float)) and not isinstance(ans_val, bool):
+            if ans_val == 1:
+                ans_val = True
+            elif ans_val == 0:
+                ans_val = False
+
         if not isinstance(ans_val, bool):
             return abstain_resp
         return {"id": question_id, "type": "boolean", "answer": ans_val}

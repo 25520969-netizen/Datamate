@@ -28,25 +28,24 @@ while os.system("curl -s http://localhost:8000/v1/models > /dev/null") != 0:
     time.sleep(4)
 print("✅ [2/4] vLLM đã sẵn sàng! Bắt đầu chạy benchmark 300 câu...\n")
 
-# 2.5 Tự động phát hiện và giải nén train_preprocessed_full nếu có
+# 2.5 Tự động phát hiện thư mục dữ liệu trực tiếp trên Google Drive hoặc cục bộ
+candidate_dirs = [
+    Path("/content/drive/MyDrive/train_preprocessed_full"),
+    Path("/content/drive/MyDrive/train_preprocessed"),
+    Path("/content/drive/MyDrive/Datamate/train_preprocessed_full"),
+    Path("/content/drive/MyDrive/Datamate/train_preprocessed"),
+    Path("train_preprocessed_full"),
+    Path("train_preprocessed"),
+    Path("train/data"),
+]
 data_root = "train/data"
-drive_zip = Path("/content/drive/MyDrive/train_preprocessed_full.zip")
-local_zip = Path("train_preprocessed_full.zip")
-prep_dir = Path("train_preprocessed_full")
-
-if not prep_dir.exists():
-    if drive_zip.exists():
-        print(f"📦 Phát hiện {drive_zip}! Đang tự động giải nén...")
-        os.system(f"unzip -q -o '{drive_zip}' -d .")
-    elif local_zip.exists():
-        print(f"📦 Phát hiện {local_zip}! Đang tự động giải nén...")
-        os.system(f"unzip -q -o '{local_zip}' -d .")
-
-if prep_dir.exists():
-    print("🚀 Sử dụng dữ liệu preprocessed đầy đủ: train_preprocessed_full\n")
-    data_root = "train_preprocessed_full"
+for p in candidate_dirs:
+    if p.exists() and p.is_dir() and any(p.glob("biz_*")):
+        data_root = str(p)
+        print(f"🚀 Sử dụng dữ liệu trực tiếp từ: {data_root}\n")
+        break
 else:
-    print("ℹ️ Sử dụng dữ liệu gốc: train/data\n")
+    print(f"ℹ️ Sử dụng dữ liệu mặc định: {data_root}\n")
 
 # 3. Chạy 300 câu benchmark và in trực tiếp log ra màn hình Colab
 os.system(

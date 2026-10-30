@@ -28,17 +28,38 @@ while os.system("curl -s http://localhost:8000/v1/models > /dev/null") != 0:
     time.sleep(4)
 print("✅ [2/4] vLLM đã sẵn sàng! Bắt đầu chạy benchmark 300 câu...\n")
 
+# 2.5 Tự động phát hiện và giải nén train_preprocessed_full nếu có
+data_root = "train/data"
+drive_zip = Path("/content/drive/MyDrive/train_preprocessed_full.zip")
+local_zip = Path("train_preprocessed_full.zip")
+prep_dir = Path("train_preprocessed_full")
+
+if not prep_dir.exists():
+    if drive_zip.exists():
+        print(f"📦 Phát hiện {drive_zip}! Đang tự động giải nén...")
+        os.system(f"unzip -q -o '{drive_zip}' -d .")
+    elif local_zip.exists():
+        print(f"📦 Phát hiện {local_zip}! Đang tự động giải nén...")
+        os.system(f"unzip -q -o '{local_zip}' -d .")
+
+if prep_dir.exists():
+    print("🚀 Sử dụng dữ liệu preprocessed đầy đủ: train_preprocessed_full\n")
+    data_root = "train_preprocessed_full"
+else:
+    print("ℹ️ Sử dụng dữ liệu gốc: train/data\n")
+
 # 3. Chạy 300 câu benchmark và in trực tiếp log ra màn hình Colab
 os.system(
-    "python3 run_pipeline.py "
-    "--questions train/sample_300_questions.jsonl "
-    "--gold train/sample_300_answers.jsonl "
-    "--output predictions_sample300.jsonl "
-    "--backend openai "
-    "--api-base http://localhost:8000/v1 "
-    "--concurrency 8 "
-    "--evaluate "
-    "--fresh"
+    f"python3 run_pipeline.py "
+    f"--questions train/sample_300_questions.jsonl "
+    f"--gold train/sample_300_answers.jsonl "
+    f"--data-root {data_root} "
+    f"--output predictions_sample300.jsonl "
+    f"--backend openai "
+    f"--api-base http://localhost:8000/v1 "
+    f"--concurrency 8 "
+    f"--evaluate "
+    f"--fresh"
 )
 
 # 4. Lưu file kết quả về Google Drive

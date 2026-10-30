@@ -633,6 +633,8 @@ class BusinessDataStore:
         if business_id in self._readme_cache:
             return self._readme_cache[business_id]
         readme_path = self.get_biz_dir(business_id) / "README.md"
+        if not readme_path.exists():
+            readme_path = self.get_biz_dir(business_id) / "_readme.txt"
         content = to_nfc(readme_path.read_text(encoding="utf-8")) if readme_path.exists() else ""
         self._readme_cache[business_id] = content
         return content
@@ -730,6 +732,17 @@ class BusinessDataStore:
             return {}
 
         raw_tables: Dict[str, pd.DataFrame] = {}
+
+        # Nếu thư mục là preprocessed có thư mục con tables/ (chứa các file CSV đã làm sạch 100%)
+        tables_sub = biz_dir / "tables"
+        if tables_sub.exists() and tables_sub.is_dir():
+            for file_path in sorted(tables_sub.glob("*.csv")):
+                stem = to_nfc(file_path.stem).strip()
+                df = pd.read_csv(file_path, encoding="utf-8", low_memory=False)
+                df = normalize_dataframe_nfc(df)
+                raw_tables[stem] = df
+            raw_tables = self._standardize_business_tables(raw_tables)
+            return raw_tables
 
         for file_path in sorted(biz_dir.iterdir()):
             if file_path.name.startswith(".") or file_path.name.lower() == "readme.md":

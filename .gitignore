@@ -13,3 +13,4 @@ __pycache__/
 *.pyc
 predictions*.jsonl
 submission.jsonl
+*.ipynb

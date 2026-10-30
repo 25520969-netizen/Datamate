@@ -145,6 +145,24 @@ def main() -> None:
 
     args = parse_args()
 
+    # Tự động ưu tiên thư mục preprocessed nếu có trên Google Drive hoặc thư mục làm việc
+    if str(args.data_root).rstrip("/\\").endswith("train/data") or not args.data_root.exists():
+        candidate_preprocessed = [
+            Path("/content/drive/MyDrive/train_preprocessed_full"),
+            Path("/content/drive/MyDrive/train_preprocessed"),
+            Path("/content/drive/MyDrive/Datamate/train_preprocessed_full"),
+            Path("/content/drive/MyDrive/Datamate/train_preprocessed"),
+            Path("/content/drive/MyDrive/zaloAI/train_preprocessed_full"),
+            Path("/content/drive/MyDrive/zaloAI/train_preprocessed"),
+            PROJECT_ROOT / "train_preprocessed_full",
+            PROJECT_ROOT / "train_preprocessed",
+        ]
+        for candidate in candidate_preprocessed:
+            if candidate.exists() and candidate.is_dir() and any(candidate.glob("biz_*")):
+                print(f"🚀 [Auto-Detect] Tự động phát hiện dữ liệu tiền xử lý tối ưu tại: {candidate}")
+                args.data_root = candidate
+                break
+
     questions = load_jsonl(args.questions)
     if args.limit and args.limit > 0:
         questions = questions[: args.limit]

@@ -622,7 +622,13 @@ class BusinessDataStore:
         cache_root: Optional[Path] = None,
     ) -> None:
         self.data_root = Path(data_root)
-        self.cache_root = cache_root or (self.data_root.parent.parent / ".cache" / "ingested")
+        if cache_root is not None:
+            self.cache_root = Path(cache_root)
+        elif Path("/content").exists():
+            # Trên Google Colab, luôn ưu tiên SSD cục bộ /content/.cache thay vì ghi vào Drive qua FUSE
+            self.cache_root = Path("/content/.cache/ingested")
+        else:
+            self.cache_root = self.data_root.parent.parent / ".cache" / "ingested"
         self._mem_cache: Dict[str, Dict[str, pd.DataFrame]] = {}
         self._readme_cache: Dict[str, str] = {}
 

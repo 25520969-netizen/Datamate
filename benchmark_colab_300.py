@@ -67,7 +67,7 @@ os.system(
     f"--concurrency 4 "
     f"--max-retries 1 "
     f"--consensus-mode dual "
-    f"--arbitration adaptive "
+    f"--arbitration strict "
     f"--evaluate "
     f"--fresh"
 )

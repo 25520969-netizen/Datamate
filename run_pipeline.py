@@ -146,9 +146,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--arbitration",
         type=str,
-        default="adaptive",
+        default="strict",
         choices=["adaptive", "strict"],
-        help="Chính sách trọng tài: 'adaptive' (giữ đáp án hợp lệ nếu bên kia lỗi kỹ thuật) hoặc 'strict' (bắt buộc cả 2 thành công).",
+        help="Chính sách trọng tài: 'strict' (bắt buộc cả 2 thành công và đồng thuận, an toàn tối đa) hoặc 'adaptive' (fallback p1 khi p2 lỗi kỹ thuật).",
     )
     parser.add_argument(
         "--fresh",

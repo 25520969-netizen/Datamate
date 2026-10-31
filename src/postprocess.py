@@ -463,7 +463,7 @@ def postprocess_and_guard(
 
     # 7. Xử lý TABLE
     if ans_type == "table":
-        # Chuẩn hóa nếu model trả về danh sách hàng [[...], ...] thay vì dict {"columns": ..., "rows": ...}
+        # Chuẩn hóa nếu model trả về danh sách hàng [[...], ...] hoặc list of dicts [{'col1': val1, ...}] (chuẩn Pandas orient='records')
         if isinstance(ans_val, list):
             if len(ans_val) > 0 and isinstance(ans_val[0], (list, tuple)):
                 # Kiểm tra nếu dòng 0 là tiêu đề cột
@@ -473,6 +473,10 @@ def postprocess_and_guard(
                 else:
                     cols = [f"col_{i+1}" for i in range(len(ans_val[0]))]
                     rows = ans_val
+                ans_val = {"columns": cols, "rows": rows}
+            elif len(ans_val) > 0 and isinstance(ans_val[0], dict):
+                cols = list(ans_val[0].keys())
+                rows = [[r.get(c) for c in cols] for r in ans_val]
                 ans_val = {"columns": cols, "rows": rows}
             else:
                 return abstain_resp

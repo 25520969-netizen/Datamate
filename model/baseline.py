@@ -328,7 +328,7 @@ class DataMateAgent:
         max_retries: int = 2,
         verbose: bool = False,
         consensus_mode: str = "dual",
-        arbitration_strategy: str = "adaptive",
+        arbitration_strategy: str = "strict",
     ) -> None:
         self.store = BusinessDataStore(data_root=data_root, cache_root=cache_root)
         self.date_resolver = DateResolver(calendar_path=calendar_path)

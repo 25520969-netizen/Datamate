@@ -848,6 +848,37 @@ class DAILFewShotSelector:
         "WHERE CAST(\"Hạn sử dụng\" AS DATE) <= DATE '2025-06-30';"
     )
 
+    EXEMPLAR_TOP_CUSTOMER = (
+        "/* Ví dụ DAIL-O 13: Tìm khách hàng mua nhiều nhất / chi tiêu nhiều nhất */\n"
+        "-- Câu hỏi: Khách hàng nào chi tiêu nhiều nhất trong tháng 5/2025?\n"
+        "-- Lưu ý: BẮT BUỘC loại bỏ 'Khách lẻ', 'lẻ', 'vãng lai' và NULL để tìm tên khách hàng cụ thể:\n"
+        "SELECT \"Khách hàng\" AS answer\n"
+        "FROM ban_hang\n"
+        "WHERE \"status_norm\" = 'Hoàn thành'\n"
+        "  AND \"Thời gian\" >= '2025-05-01' AND \"Thời gian\" < '2025-06-01'\n"
+        "  AND \"Khách hàng\" NOT ILIKE '%khách lẻ%'\n"
+        "  AND \"Khách hàng\" NOT ILIKE '%lẻ%'\n"
+        "  AND \"Khách hàng\" NOT ILIKE '%vãng lai%'\n"
+        "  AND \"Khách hàng\" IS NOT NULL\n"
+        "GROUP BY \"Khách hàng\"\n"
+        "ORDER BY SUM(\"revenue_norm\") DESC\n"
+        "LIMIT 1;"
+    )
+
+    EXEMPLAR_CATEGORY_SHARE = (
+        "/* Ví dụ DAIL-O 14: Tỉ trọng đóng góp doanh thu của một nhóm hàng / kênh (%) */\n"
+        "-- Câu hỏi: Nhóm hàng Nước uống đóng góp bao nhiêu % trong tổng doanh thu tháng 7/2025?\n"
+        "-- Lưu ý: Tử số là doanh thu nhóm hàng, mẫu số là tổng doanh thu toàn cửa hàng trong cùng kỳ:\n"
+        "SELECT ROUND(\n"
+        "  COALESCE(SUM(CASE WHEN \"Nhóm hàng\" ILIKE '%nước uống%' THEN \"revenue_norm\" ELSE 0 END), 0) * 100.0 /\n"
+        "  NULLIF(SUM(\"revenue_norm\"), 0),\n"
+        "  2\n"
+        ") AS answer\n"
+        "FROM ban_hang\n"
+        "WHERE \"status_norm\" = 'Hoàn thành'\n"
+        "  AND \"Thời gian\" >= '2025-07-01' AND \"Thời gian\" < '2025-08-01';"
+    )
+
     @classmethod
     def select_exemplars(cls, question: str, has_entity_hint: bool = False) -> str:
         """
@@ -872,35 +903,43 @@ class DAILFewShotSelector:
         elif any(kw in q for kw in ["cung ky nam truoc", "cung ky nam ngoai", "so voi cung ky nam truoc"]):
             selected.append(cls.EXEMPLAR_GROWTH_SAME_PERIOD_YEAR)
 
-        # Intent 5: So sánh ca chiều với ca sáng
+        # Intent 5: Tỉ trọng đóng góp danh mục / nhóm hàng (%)
+        if any(kw in q for kw in ["dong gop", "chiem bao nhieu %", "chiem bao nhieu phan tram", "ti trong", "ty trong", "phan tram doanh thu"]):
+            selected.append(cls.EXEMPLAR_CATEGORY_SHARE)
+
+        # Intent 6: Top khách hàng mua nhiều nhất / chi tiêu nhiều nhất (loại bỏ Khách lẻ)
+        if any(kw in q for kw in ["ai mua", "khach nao mua", "khach nao chi", "khach hang nao mua", "khach mua nhieu", "chi tieu nhieu nhat", "mua nhieu nhat", "ai chi tieu", "ai la nguoi mua"]):
+            selected.append(cls.EXEMPLAR_TOP_CUSTOMER)
+
+        # Intent 7: So sánh ca chiều với ca sáng
         if any(kw in q for kw in ["ca chieu", "ca sang"]) and any(kw in q for kw in ["so voi", "so vs", "chenh", "tang hay giam"]):
             selected.append(cls.EXEMPLAR_SHIFT_COMPARISON)
 
-        # Intent 6: Top bán chạy / chạy nhất
+        # Intent 8: Top bán chạy / chạy nhất
         if any(kw in q for kw in ["chay nhat", "hot nhat", "ban nhieu nhat", "ban chay nhat", "top 3 sp", "top 5 sp", "top 5 hang"]):
             selected.append(cls.EXEMPLAR_TOP_ITEMS_QTY_BASE)
 
-        # Intent 7: Đếm số lượng khách hàng khác nhau
+        # Intent 9: Đếm số lượng khách hàng khác nhau
         if any(kw in q for kw in ["khach hang khac nhau", "so khach den mua", "may khach den mua", "may khach mua", "bao nhieu khach hang den mua"]):
             selected.append(cls.EXEMPLAR_DISTINCT_CUSTOMERS)
 
-        # Intent 8: Doanh thu theo kênh bán / hình thức
+        # Intent 10: Doanh thu theo kênh bán / hình thức
         if any(kw in q for kw in ["moi loai bao nhieu", "moi hinh thuc bao nhieu", "ban tai quay va"]) and any(kw in q for kw in ["doanh thu", "dthu"]):
             selected.append(cls.EXEMPLAR_SALES_BY_CHANNEL)
 
-        # Intent 9: Doanh thu lũy kế từ đầu năm (YTD)
+        # Intent 11: Doanh thu lũy kế từ đầu năm (YTD)
         if any(kw in q for kw in ["tu dau nam", "dau nam den nay", "luy ke tu dau nam"]):
             selected.append(cls.EXEMPLAR_YTD_REVENUE)
 
-        # Intent 10: Hết hạn sử dụng / HSD / Cận date
+        # Intent 12: Hết hạn sử dụng / HSD / Cận date
         if any(kw in q for kw in ["het han", "can date", "het date", "qua han dung"]):
             selected.append(cls.EXEMPLAR_EXPIRY_GOODS)
 
-        # Intent 11: Hỏi về 1 món ăn / sản phẩm cụ thể
+        # Intent 13: Hỏi về 1 món ăn / sản phẩm cụ thể
         if has_entity_hint and not any(kw in q for kw in ["chay nhat", "hot nhat", "ban nhieu nhat"]):
             selected.append(cls.EXEMPLAR_SINGLE_ITEM_QUERY)
 
-        # Intent 12: Công nợ khách hàng
+        # Intent 14: Công nợ khách hàng
         if any(kw in q for kw in ["cong no", "con no", "no nhieu nhat"]):
             selected.append(cls.EXEMPLAR_CUSTOMER_DEBT)
 

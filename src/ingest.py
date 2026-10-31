@@ -16,6 +16,7 @@ Module 1: Ingestion & Schema Standardization Engine.
 import json
 import re
 import sqlite3
+import sys
 import unicodedata
 import warnings
 from pathlib import Path
@@ -1404,6 +1405,11 @@ class BusinessDataStore:
         tables = self.load_tables(business_id)
         tables = self._enrich_table_synonyms_and_id(tables, business_id)
         con = duckdb.connect(database=":memory:")
+        if sys.platform == "darwin":
+            try:
+                con.execute("PRAGMA threads=1; PRAGMA max_memory='1GB';")
+            except Exception:
+                pass
         for tbl_name, df in tables.items():
             con.register(tbl_name, df)
         return con, tables

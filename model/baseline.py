@@ -41,6 +41,8 @@ Nhiệm vụ: Viết một đoạn mã Python truy vấn dữ liệu từ kết 
 QUY TẮC CỐT LÕI (DUCKDB SQL):
 1. Ưu tiên giải bài toán bằng truy vấn `con.execute(\"\"\"SELECT ...\"\"\")`:
    - Dữ liệu đã nạp sẵn trong kết nối `con` (DuckDB) và `tables` (Pandas), TUYỆT ĐỐI KHÔNG gọi `duckdb.connect(...)` hoặc mở file mới.
+   - Tuyệt đối KHÔNG viết comment (# ...) trong code Python, chỉ viết trực tiếp các lệnh thực thi.
+   - Luôn bọc `COALESCE(SUM(...), 0)` ở các hàm tổng hợp để tránh trả về NULL. Khi lấy kết quả: `row = con.execute(query).fetchone(); val = row[0] if row else 0; result = {"type": "number", "answer": float(val) if val is not None else 0.0}`.
    - Tất cả tên bảng và tên cột tiếng Việt có dấu, khoảng trắng BẮT BUỘC bọc trong ngoặc kép: `"Thành tiền"`, `"Mã đơn hàng"`, `"Ngày"`, `"Trạng thái"`.
    - Lọc ngày: `WHERE CAST("Ngày" AS DATE) BETWEEN DATE 'start' AND DATE 'end'` (hoặc `CAST("Ngày" AS VARCHAR)`).
    - Lọc đơn hợp lệ (bỏ đơn hủy, đơn trả): `WHERE "status_norm" = 'Hoàn thành'` (hoặc `"Trạng thái" NOT ILIKE '%hủy%' AND "Trạng thái" NOT ILIKE '%trả%'`).
@@ -72,12 +74,15 @@ SYSTEM_PROMPT_DEFENSIVE_SQL = """Bạn là Chuyên gia Khoa học Dữ liệu ch
 Nhiệm vụ: Viết một đoạn mã Python sử dụng kết nối DuckDB `con` với kỹ thuật Common Table Expressions (WITH ... AS ...) để bóc tách bài toán thành từng bước phòng thủ chặt chẽ.
 
 QUY TẮC CỐT LÕI (DEFENSIVE CTE DUCKDB RELATIONAL):
-1. Tổ chức truy vấn theo các bước CTE rõ ràng để kiểm soát dữ liệu:
-   - CTE 1 (valid_orders): Lọc đơn hàng hợp lệ theo ngày và loại bỏ đơn 'Đã hủy', 'Trả hàng' (CHÚ Ý: nếu tính tỉ lệ hủy đơn thì giữ lại đơn hủy để đếm).
+1. Tổ chức truy vấn kiểm soát dữ liệu chặt chẽ:
+   - CTE 1 (valid_orders): Lọc đơn hàng hợp lệ theo ngày và loại bỏ đơn 'Đã hủy', 'Trả hàng' (CHÚ Ý: nếu tính tỉ lệ hủy đơn thì giữ lại đơn hủy để đếm). BẮT BUỘC dùng `SELECT * FROM ... WHERE ...` để giữ lại toàn bộ các cột phục vụ cho các bước JOIN và GROUP BY phía sau, tuyệt đối không liệt kê thiếu cột gây lỗi Binder Error.
    - CTE 2 (filtered_data): Ghép nối với bảng chi tiết hoặc bảng danh mục theo khóa ngoại (`Mã đơn hàng`, `Mã sản phẩm`). Khi JOIN, luôn dùng alias rõ ràng: o."Khách hàng", c."Khách hàng" để tránh lỗi DuckDB Ambiguous reference.
    - CTE 3 (aggregated): Nhóm và tính toán tổng tiền, số lượng (`qty_base`), hoặc tỉ trọng.
+   - Hoàn toàn có thể viết trực tiếp câu lệnh SELECT duy nhất nếu truy vấn đơn giản, không bắt buộc phải tách nhiều CTE.
 2. Quy tắc an toàn bắt buộc:
    - Dữ liệu đã nạp sẵn trong kết nối `con` (DuckDB) và `tables` (Pandas), TUYỆT ĐỐI KHÔNG gọi `duckdb.connect(...)` hoặc mở file mới.
+   - Tuyệt đối KHÔNG viết comment (# ...) trong code Python, chỉ viết trực tiếp các lệnh thực thi.
+   - Luôn bọc `COALESCE(SUM(...), 0)` ở các hàm tổng hợp để tránh trả về NULL; trong Python: `row = con.execute(query).fetchone(); val = row[0] if row else 0; result = {"type": "number", "answer": float(val) if val is not None else 0.0}`.
    - Tên bảng và tên cột tiếng Việt có dấu, khoảng trắng BẮT BUỘC bọc trong ngoặc kép: `"Thành tiền"`, `"Mã đơn hàng"`, `"Ngày"`, `"Trạng thái"`.
    - Lọc ngày: `WHERE CAST("Ngày" AS DATE) BETWEEN DATE 'start' AND DATE 'end'`.
    - Doanh thu (revenue): Luôn là `SUM(COALESCE("revenue_norm", "Thành tiền"))`.
@@ -365,7 +370,7 @@ class DataMateAgent:
         parts.extend([
             "=== YÊU CẦU SINH MÃ PYTHON ===\n"
             "Hãy viết mã Python truy vấn dữ liệu từ `tables` hoặc `con` DuckDB để tính ra kết quả chính xác.\n"
-            "Toàn bộ bảng dữ liệu đã nạp sẵn vào biến `con` và `tables`, không gọi `duckdb.connect()`.\n"
+            "Toàn bộ bảng dữ liệu đã nạp sẵn vào biến `con` và `tables`, không gọi `duckdb.connect()`, không viết comment (# ...).\n"
             f"Cuối đoạn code, bắt buộc gán `result = {{\"type\": \"...\", \"answer\": ...}}`."
         ])
         return "\n\n".join(parts)

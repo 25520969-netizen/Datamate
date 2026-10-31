@@ -404,6 +404,22 @@ def postprocess_and_guard(
 
         if not isinstance(ans_val, list) or len(ans_val) == 0:
             return abstain_resp
+
+        # Tự động làm phẳng (flatten) các danh sách lồng nhau / kết quả fetchall() từ DuckDB
+        # Ví dụ: [('Panadol...',), ('Smecta...',)] hoặc [['A'], ['B']] hoặc 1 hàng duy nhất: [[val1, val2]]
+        if len(ans_val) == 1 and isinstance(ans_val[0], (list, tuple)):
+            ans_val = list(ans_val[0])
+        elif all(isinstance(x, (list, tuple)) and len(x) == 1 for x in ans_val):
+            ans_val = [x[0] for x in ans_val]
+        elif any(isinstance(x, (list, tuple)) for x in ans_val):
+            flattened = []
+            for x in ans_val:
+                if isinstance(x, (list, tuple)):
+                    flattened.extend(x)
+                else:
+                    flattened.append(x)
+            ans_val = flattened
+
         cleaned_list: List[Any] = []
         money_flag = is_money_question(question)
         for item in ans_val:
@@ -447,8 +463,29 @@ def postprocess_and_guard(
 
     # 7. Xử lý TABLE
     if ans_type == "table":
-        if not isinstance(ans_val, dict):
+        # Chuẩn hóa nếu model trả về danh sách hàng [[...], ...] thay vì dict {"columns": ..., "rows": ...}
+        if isinstance(ans_val, list):
+            if len(ans_val) > 0 and isinstance(ans_val[0], (list, tuple)):
+                # Kiểm tra nếu dòng 0 là tiêu đề cột
+                if all(isinstance(c, str) for c in ans_val[0]) and len(ans_val) > 1 and not all(isinstance(c, str) for c in ans_val[1]):
+                    cols = [str(c) for c in ans_val[0]]
+                    rows = ans_val[1:]
+                else:
+                    cols = [f"col_{i+1}" for i in range(len(ans_val[0]))]
+                    rows = ans_val
+                ans_val = {"columns": cols, "rows": rows}
+            else:
+                return abstain_resp
+        elif isinstance(ans_val, dict):
+            if "rows" in ans_val and "columns" not in ans_val:
+                rows_cand = ans_val.get("rows")
+                if isinstance(rows_cand, list) and len(rows_cand) > 0 and isinstance(rows_cand[0], (list, tuple)):
+                    ans_val["columns"] = [f"col_{i+1}" for i in range(len(rows_cand[0]))]
+                else:
+                    return abstain_resp
+        else:
             return abstain_resp
+
         cols = ans_val.get("columns")
         rows = ans_val.get("rows")
         if not isinstance(cols, list) or not isinstance(rows, list) or len(cols) == 0 or len(rows) == 0:

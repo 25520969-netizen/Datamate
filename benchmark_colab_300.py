@@ -21,7 +21,6 @@ vllm = subprocess.Popen([
     "--max-model-len", "4096",
     "--gpu-memory-utilization", "0.90",
     "--enable-prefix-caching",
-    "--enforce-eager",
     "--trust-remote-code",
 ])
 
@@ -64,7 +63,8 @@ os.system(
     f"--model Qwen/Qwen2.5-Coder-14B-Instruct-AWQ "
     f"--backend openai "
     f"--api-base http://localhost:8000/v1 "
-    f"--concurrency 4 "
+    f"--concurrency 3 "
+    f"--max-retries 1 "
     f"--consensus-mode dual "
     f"--arbitration adaptive "
     f"--evaluate "

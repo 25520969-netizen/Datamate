@@ -728,47 +728,85 @@ class BusinessDataStore:
             if "business_id" not in df.columns:
                 df["business_id"] = business_id
 
-            # Khách hàng
-            if "Tên KH" in df.columns and "Tên khách" not in df.columns:
-                df["Tên khách"] = df["Tên KH"]
-            if "Tên KH" in df.columns and "Tên khách hàng" not in df.columns:
-                df["Tên khách hàng"] = df["Tên KH"]
-            if "Khách hàng" in df.columns and "Tên khách" not in df.columns:
-                df["Tên khách"] = df["Khách hàng"]
-            if "Mã KH" in df.columns and "Mã khách hàng" not in df.columns:
-                df["Mã khách hàng"] = df["Mã KH"]
-            if "Mã khách hàng" in df.columns and "Mã KH" not in df.columns:
-                df["Mã KH"] = df["Mã khách hàng"]
+            # 1. Khách hàng (Tên)
+            cust_name_syns = ["Khách hàng", "Tên KH", "Tên khách hàng", "Tên khách", "Khách hàng (tên)", "TenKH", "KH"]
+            found_cust_name = next((c for c in cust_name_syns if c in df.columns), None)
+            if found_cust_name:
+                for target in ["Khách hàng", "Tên KH", "Tên khách hàng", "Tên khách"]:
+                    if target not in df.columns:
+                        df[target] = df[found_cust_name]
 
-            # Đơn hàng / Chứng từ
-            for ord_col in ["Mã chứng từ", "Mã hóa đơn", "Số chứng từ", "SoCT", "Số HĐ", "Mã GD", "Mã đơn"]:
-                if ord_col in df.columns and "Mã đơn hàng" not in df.columns:
-                    df["Mã đơn hàng"] = df[ord_col]
-                    break
-            if "Mã đơn hàng" in df.columns and "Mã hóa đơn" not in df.columns:
-                df["Mã hóa đơn"] = df["Mã đơn hàng"]
+            # 2. Mã khách hàng
+            cust_id_syns = ["Mã KH", "Mã khách hàng", "Mã khách", "MaKH", "ma_kh", "Customer ID", "Mã khách mua"]
+            found_cust_id = next((c for c in cust_id_syns if c in df.columns), None)
+            if found_cust_id:
+                for target in ["Mã KH", "Mã khách hàng", "Mã khách"]:
+                    if target not in df.columns:
+                        df[target] = df[found_cust_id]
 
-            # Trạng thái
-            if "status_norm" in df.columns and "Trạng thái" not in df.columns:
-                df["Trạng thái"] = df["status_norm"]
-            if "Trạng thái" in df.columns and "status_norm" not in df.columns:
-                df["status_norm"] = df["Trạng thái"]
+            # 3. Mã đơn hàng / Chứng từ
+            order_syns = ["Mã đơn hàng", "Mã hóa đơn", "Mã chứng từ", "Số chứng từ", "SoCT", "Số HĐ", "Mã GD", "Mã đơn", "Ma don", "Số phiếu", "Mã giao dịch"]
+            found_order = next((c for c in order_syns if c in df.columns), None)
+            if found_order:
+                for target in ["Mã đơn hàng", "Mã hóa đơn", "Mã chứng từ", "Mã đơn"]:
+                    if target not in df.columns:
+                        df[target] = df[found_order]
 
-            # Thời gian / Ngày
-            if "Thời gian" in df.columns and "Ngày" not in df.columns:
-                df["Ngày"] = df["Thời gian"]
-            if "Ngày" in df.columns and "Thời gian" not in df.columns:
-                df["Thời gian"] = df["Ngày"]
+            # 4. Tên sản phẩm / Hàng hóa
+            prod_name_syns = ["Tên sản phẩm", "Tên hàng", "Tên hàng hóa", "Mặt hàng", "Tên mặt hàng", "Tên SP", "Sản phẩm", "ten_hang"]
+            found_prod_name = next((c for c in prod_name_syns if c in df.columns), None)
+            if found_prod_name:
+                for target in ["Tên sản phẩm", "Tên hàng", "Tên hàng hóa", "Tên SP", "Sản phẩm"]:
+                    if target not in df.columns:
+                        df[target] = df[found_prod_name]
 
-            # Sản phẩm
-            if "Tên hàng" in df.columns and "Tên sản phẩm" not in df.columns:
-                df["Tên sản phẩm"] = df["Tên hàng"]
-            if "Tên sản phẩm" in df.columns and "Tên hàng" not in df.columns:
-                df["Tên hàng"] = df["Tên sản phẩm"]
-            if "Mã hàng" in df.columns and "Mã sản phẩm" not in df.columns:
-                df["Mã sản phẩm"] = df["Mã hàng"]
-            if "Mã sản phẩm" in df.columns and "Mã hàng" not in df.columns:
-                df["Mã hàng"] = df["Mã sản phẩm"]
+            # 5. Mã sản phẩm / SKU
+            prod_id_syns = ["Mã sản phẩm", "Mã hàng", "Mã hàng hóa", "MaHangHoa", "MaHH", "Mã SP", "Mã SKU", "SKU", "ID SP", "Mã hàng bán"]
+            found_prod_id = next((c for c in prod_id_syns if c in df.columns), None)
+            if found_prod_id:
+                for target in ["Mã sản phẩm", "Mã hàng", "Mã hàng hóa", "Mã SKU"]:
+                    if target not in df.columns:
+                        df[target] = df[found_prod_id]
+
+            # 6. Ngày / Thời gian
+            date_syns = ["Ngày", "Thời gian", "Ngay", "NgayLap", "Ngày tạo", "Ngày đặt hàng", "Ngày bán", "Ngày lập", "Ngày mua", "NgayBan", "Thời điểm", "Date"]
+            found_date = next((c for c in date_syns if c in df.columns), None)
+            if found_date:
+                for target in ["Ngày", "Thời gian", "NgàyLap"]:
+                    if target not in df.columns:
+                        df[target] = df[found_date]
+
+            # 7. Trạng thái đơn hàng
+            status_syns = ["Trạng thái", "status_norm", "TinhTrang", "Tình trạng", "TrangThai", "Tình trạng đơn", "Trạng thái đơn hàng", "Trạng thái xử lý", "Xử lý"]
+            found_status = next((c for c in status_syns if c in df.columns), None)
+            if found_status:
+                for target in ["Trạng thái", "status_norm", "Tình trạng"]:
+                    if target not in df.columns:
+                        df[target] = df[found_status]
+
+            # 8. Doanh thu / Thành tiền / Tổng tiền
+            revenue_syns = ["Thành tiền", "revenue_norm", "Tổng tiền", "ThanhTien", "TongTien", "Tiền bán", "Tổng bill", "Tổng đơn", "Trị giá", "Giá trị"]
+            found_rev = next((c for c in revenue_syns if c in df.columns), None)
+            if found_rev:
+                for target in ["Thành tiền", "revenue_norm", "Tổng tiền"]:
+                    if target not in df.columns:
+                        df[target] = df[found_rev]
+
+            # 9. Nhóm hàng / Danh mục / Loại sản phẩm
+            cat_syns = ["Nhóm hàng", "Nhóm", "Nhóm hàng hóa", "Danh mục", "Nhom hang", "Loại sản phẩm", "Loại hàng hóa", "Loại hàng", "Nhóm hàng(3 Cấp)"]
+            found_cat = next((c for c in cat_syns if c in df.columns), None)
+            if found_cat:
+                for target in ["Nhóm hàng", "Nhóm", "Nhóm hàng hóa", "Danh mục", "Loại sản phẩm"]:
+                    if target not in df.columns:
+                        df[target] = df[found_cat]
+
+            # 10. Hạn sử dụng (HSD)
+            hsd_syns = ["Hạn sử dụng", "HSD", "HanSuDung", "Hạn dùng"]
+            found_hsd = next((c for c in hsd_syns if c in df.columns), None)
+            if found_hsd:
+                for target in ["Hạn sử dụng", "HSD"]:
+                    if target not in df.columns:
+                        df[target] = df[found_hsd]
 
         return tables
 
@@ -1416,6 +1454,8 @@ class BusinessDataStore:
             readme_text = readme_text[:2400] + "\n...(xem thêm trong tài liệu shop)"
 
         lines = [
+            "=== MÔI TRƯỜNG DỮ LIỆU: Toàn bộ bảng dưới đây đã được nạp sẵn vào kết nối DuckDB `con` và dict `tables`. KHÔNG mở kết nối mới ===",
+            "",
             f"=== TÀI LIỆU MÔ TẢ DỮ LIỆU CỦA SHOP ({business_id}/README.md) ===",
             readme_text,
             "",

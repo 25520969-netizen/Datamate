@@ -127,6 +127,9 @@ class SafeDuckDBWrapper:
     def query(self, query: str, *args, **kwargs):
         return self._inner.query(self._fix_sql(query), *args, **kwargs)
 
+    def close(self, *args, **kwargs):
+        pass
+
     def __getattr__(self, name: str):
         return getattr(self._inner, name)
 
@@ -275,6 +278,9 @@ def main():
 
         def query(self, query: str, *args, **kwargs):
             return self._inner.query(self._fix_sql(query), *args, **kwargs)
+
+        def close(self, *args, **kwargs):
+            pass
 
         def __getattr__(self, name: str):
             return getattr(self._inner, name)
@@ -425,6 +431,9 @@ class _DuckDBModuleProxy:
     def query(self, *args, **kwargs):
         return self._con.query(*args, **kwargs)
 
+    def close(self, *args, **kwargs):
+        pass
+
     def __getattr__(self, name: str):
         return getattr(duckdb, name)
 
@@ -439,6 +448,7 @@ class PythonSandbox:
         timeout_seconds: float = 10.0,
         python_executable: Optional[str] = None,
         in_process: bool = True,
+        store: Optional[BusinessDataStore] = None,
     ) -> None:
         self.project_root = Path(__file__).resolve().parent.parent
         self.data_root = Path(data_root)
@@ -446,7 +456,7 @@ class PythonSandbox:
         self.timeout_seconds = timeout_seconds
         self.python_executable = python_executable or sys.executable
         self.in_process = in_process
-        self._warm_store = BusinessDataStore(data_root=self.data_root, cache_root=self.cache_root)
+        self._warm_store = store or BusinessDataStore(data_root=self.data_root, cache_root=self.cache_root)
 
     def _execute_in_process(
         self,
@@ -461,8 +471,23 @@ class PythonSandbox:
         duckdb_proxy = _DuckDBModuleProxy(safe_con)
 
         fuzzy_ctx = _FuzzyDateContext(date_context or {})
+
+        # Hook __import__ để nếu LLM sinh `import duckdb` hoặc `from duckdb import ...`
+        # thì luôn trả về duckdb_proxy (trỏ an toàn về safe_con đã nạp đủ bảng), tránh bị Python sys.modules ghi đè
+        builtins_dict = dict(__builtins__ if isinstance(__builtins__, dict) else __builtins__.__dict__)
+        orig_import = builtins_dict.get("__import__")
+
+        def _custom_import(name, *args, **kwargs):
+            if name == "duckdb":
+                return duckdb_proxy
+            if orig_import:
+                return orig_import(name, *args, **kwargs)
+            return __import__(name, *args, **kwargs)
+
+        builtins_dict["__import__"] = _custom_import
+
         env = {
-            "__builtins__": __builtins__,
+            "__builtins__": builtins_dict,
             "pd": pd,
             "np": np,
             "duckdb": duckdb_proxy,
@@ -485,31 +510,34 @@ class PythonSandbox:
 
         def _target():
             worker_tid[0] = threading.get_ident()
-            compiled = compile(cleaned_code, "<llm_generated_code>", "exec")
-            exec(compiled, env, env)
-            raw_res = env.get("result")
-            if raw_res is None and env.get("answer") is not None:
-                raw_res = env.get("answer")
-            if raw_res is None and callable(env.get("solve")):
-                raw_res = env["solve"](tables, safe_con, as_of_date)
+            try:
+                compiled = compile(cleaned_code, "<llm_generated_code>", "exec")
+                exec(compiled, env, env)
+                raw_res = env.get("result")
+                if raw_res is None and env.get("answer") is not None:
+                    raw_res = env.get("answer")
+                if raw_res is None and callable(env.get("solve")):
+                    raw_res = env["solve"](tables, safe_con, as_of_date)
 
-            if hasattr(raw_res, "df") and callable(getattr(raw_res, "df")):
-                try:
-                    raw_res = raw_res.df()
-                except Exception:
-                    pass
+                if hasattr(raw_res, "df") and callable(getattr(raw_res, "df")):
+                    try:
+                        raw_res = raw_res.df()
+                    except Exception:
+                        pass
 
-            if isinstance(raw_res, pd.DataFrame):
-                raw_res = {
-                    "columns": [str(c) for c in raw_res.columns],
-                    "rows": raw_res.values.tolist(),
-                }
-            elif isinstance(raw_res, pd.Series):
-                raw_res = raw_res.tolist()
+                if isinstance(raw_res, pd.DataFrame):
+                    raw_res = {
+                        "columns": [str(c) for c in raw_res.columns],
+                        "rows": raw_res.values.tolist(),
+                    }
+                elif isinstance(raw_res, pd.Series):
+                    raw_res = raw_res.tolist()
 
-            # Chuẩn hóa JSON để tương thích 100% với các kiểu dữ liệu của subprocess
-            raw_res = json.loads(json.dumps(raw_res, default=_serialize_default, ensure_ascii=False))
-            return {"ok": True, "result": raw_res, "error": None}
+                # Chuẩn hóa JSON để tương thích 100% với các kiểu dữ liệu của subprocess
+                raw_res = json.loads(json.dumps(raw_res, default=_serialize_default, ensure_ascii=False))
+                return {"ok": True, "result": raw_res, "error": None}
+            except SystemExit:
+                return {"ok": False, "result": None, "error": "Terminated on timeout."}
 
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         fut = executor.submit(_target)

@@ -40,6 +40,7 @@ Nhiệm vụ: Viết một đoạn mã Python truy vấn dữ liệu từ kết 
 
 QUY TẮC CỐT LÕI (DUCKDB SQL):
 1. Ưu tiên giải bài toán bằng truy vấn `con.execute(\"\"\"SELECT ...\"\"\")`:
+   - Dữ liệu đã nạp sẵn trong kết nối `con` (DuckDB) và `tables` (Pandas), TUYỆT ĐỐI KHÔNG gọi `duckdb.connect(...)` hoặc mở file mới.
    - Tất cả tên bảng và tên cột tiếng Việt có dấu, khoảng trắng BẮT BUỘC bọc trong ngoặc kép: `"Thành tiền"`, `"Mã đơn hàng"`, `"Ngày"`, `"Trạng thái"`.
    - Lọc ngày: `WHERE CAST("Ngày" AS DATE) BETWEEN DATE 'start' AND DATE 'end'` (hoặc `CAST("Ngày" AS VARCHAR)`).
    - Lọc đơn hợp lệ (bỏ đơn hủy, đơn trả): `WHERE "status_norm" = 'Hoàn thành'` (hoặc `"Trạng thái" NOT ILIKE '%hủy%' AND "Trạng thái" NOT ILIKE '%trả%'`).
@@ -47,7 +48,8 @@ QUY TẮC CỐT LÕI (DUCKDB SQL):
    - Xếp hạng ngày hoặc khách có doanh thu cao nhất: `ORDER BY SUM(COALESCE("revenue_norm", "Thành tiền")) DESC LIMIT N`.
    - Xếp hạng SẢN PHẨM bán chạy nhất: `ORDER BY SUM(COALESCE("qty_base", "Số lượng")) DESC LIMIT N` (xếp theo sản lượng bán ra).
    - Đếm đơn hàng: `SELECT COUNT(DISTINCT "Mã đơn hàng")` trên bảng chi tiết; không dùng `COUNT(*)` kẻo đếm nhầm dòng sản phẩm.
-   - Xếp hạng khách hàng: Bỏ khách lẻ (`WHERE "Khách hàng" NOT ILIKE '%khách lẻ%' AND "Khách hàng" IS NOT NULL`).
+   - Xếp hạng khách hàng: BẮT BUỘC loại bỏ khách lẻ và khách vãng lai: `WHERE "Khách hàng" NOT ILIKE '%khách lẻ%' AND "Khách hàng" NOT ILIKE '%lẻ%' AND "Khách hàng" NOT ILIKE '%vãng lai%' AND "Khách hàng" IS NOT NULL`.
+   - Khi JOIN nhiều bảng (vd DonHang và ChiTietDon), luôn chỉ định rõ alias trước tên cột (vd: o."Khách hàng", c."Khách hàng") để tránh lỗi DuckDB "Ambiguous reference to column name".
    - Tỉ lệ đơn hủy: KHÔNG được lọc bỏ đơn hủy trước khi tính (tuyệt đối không dùng `WHERE "status_norm" = 'Hoàn thành'`). Công thức: `COUNT(DISTINCT CASE WHEN "status_norm" = 'Đã hủy' THEN "Mã đơn hàng" END) * 100.0 / NULLIF(COUNT(DISTINCT "Mã đơn hàng"), 0)`.
    - Tỉ trọng doanh thu nhóm/sản phẩm: Mẫu số phải là tổng doanh thu toàn shop (không dùng INNER JOIN làm co hẹp mẫu số). Ví dụ: `SUM(CASE WHEN "Nhóm" = '...' THEN "Thành tiền" ELSE 0 END) * 100.0 / NULLIF(SUM("Thành tiền"), 0)`.
    - Tìm kiếm chuỗi tiếng Việt không dấu hoặc viết tắt: Dùng `WHERE strip_accents("Tên sản phẩm") ILIKE strip_accents('%từ khóa%')` (DuckDB hỗ trợ hàm `strip_accents()`).
@@ -58,8 +60,8 @@ QUY TẮC CỐT LÕI (DUCKDB SQL):
    - `percent`: `result = {"type": "percent", "answer": float(val)}` (đã nhân 100, ví dụ: 15.5)
    - `date`: `result = {"type": "date", "answer": "YYYY-MM-DD"}`
    - `string`: `result = {"type": "string", "answer": "Tên đối tượng"}`
-   - `list`: `result = {"type": "list", "answer": [item1, item2, ...]}`
-   - `table`: `result = {"columns": ["khach_hang", "so_tien"], "rows": [["Tên A", 1000], ...]}`
+   - `list`: `result = {"type": "list", "answer": [r[0] for r in con.execute(...).fetchall()]}` (danh sách phẳng các chuỗi/số)
+   - `table`: `result = {"columns": ["tên cột 1", "tên cột 2"], "rows": [list(r) for r in con.execute(...).fetchall()]}`
    - `unanswerable`: `result = {"type": "unanswerable", "reason": "..."}`
 3. Chỉ trả về một khối mã ```python ... ``` duy nhất, không giải thích văn bản thừa."""
 
@@ -72,23 +74,24 @@ Nhiệm vụ: Viết một đoạn mã Python sử dụng kết nối DuckDB `co
 QUY TẮC CỐT LÕI (DEFENSIVE CTE DUCKDB RELATIONAL):
 1. Tổ chức truy vấn theo các bước CTE rõ ràng để kiểm soát dữ liệu:
    - CTE 1 (valid_orders): Lọc đơn hàng hợp lệ theo ngày và loại bỏ đơn 'Đã hủy', 'Trả hàng' (CHÚ Ý: nếu tính tỉ lệ hủy đơn thì giữ lại đơn hủy để đếm).
-   - CTE 2 (filtered_data): Ghép nối với bảng chi tiết hoặc bảng danh mục theo khóa ngoại (`Mã đơn hàng`, `Mã sản phẩm`).
+   - CTE 2 (filtered_data): Ghép nối với bảng chi tiết hoặc bảng danh mục theo khóa ngoại (`Mã đơn hàng`, `Mã sản phẩm`). Khi JOIN, luôn dùng alias rõ ràng: o."Khách hàng", c."Khách hàng" để tránh lỗi DuckDB Ambiguous reference.
    - CTE 3 (aggregated): Nhóm và tính toán tổng tiền, số lượng (`qty_base`), hoặc tỉ trọng.
 2. Quy tắc an toàn bắt buộc:
+   - Dữ liệu đã nạp sẵn trong kết nối `con` (DuckDB) và `tables` (Pandas), TUYỆT ĐỐI KHÔNG gọi `duckdb.connect(...)` hoặc mở file mới.
    - Tên bảng và tên cột tiếng Việt có dấu, khoảng trắng BẮT BUỘC bọc trong ngoặc kép: `"Thành tiền"`, `"Mã đơn hàng"`, `"Ngày"`, `"Trạng thái"`.
    - Lọc ngày: `WHERE CAST("Ngày" AS DATE) BETWEEN DATE 'start' AND DATE 'end'`.
    - Doanh thu (revenue): Luôn là `SUM(COALESCE("revenue_norm", "Thành tiền"))`.
    - Sản phẩm bán chạy nhất: Luôn xếp theo `SUM(COALESCE("qty_base", "Số lượng")) DESC` (sản lượng bán ra), KHÔNG xếp theo doanh thu.
    - Tránh chia cho 0: Luôn dùng `NULLIF(..., 0)` ở mẫu số để tránh lỗi crash division by zero.
    - So khớp chuỗi tiếng Việt không dấu: Dùng `strip_accents("Tên sản phẩm") ILIKE strip_accents('%từ khóa%')`.
-   - Bỏ khách lẻ khi xếp hạng khách hàng: `WHERE "Khách hàng" NOT ILIKE '%khách lẻ%' AND "Khách hàng" IS NOT NULL`.
+   - Bỏ khách lẻ và khách vãng lai khi xếp hạng khách hàng: `WHERE "Khách hàng" NOT ILIKE '%khách lẻ%' AND "Khách hàng" NOT ILIKE '%lẻ%' AND "Khách hàng" NOT ILIKE '%vãng lai%' AND "Khách hàng" IS NOT NULL`.
 3. Định dạng biến kết quả cuối cùng:
    - `number`: `result = {"type": "number", "answer": float(val)}`
    - `percent`: `result = {"type": "percent", "answer": float(val)}` (đã nhân 100, ví dụ: 40.3)
    - `date`: `result = {"type": "date", "answer": "YYYY-MM-DD"}`
    - `string`: `result = {"type": "string", "answer": "Tên đối tượng"}`
-   - `list`: `result = {"type": "list", "answer": [item1, item2, ...]}`
-   - `table`: `result = {"columns": ["cột 1", "cột 2"], "rows": [[val1, val2], ...]}`
+   - `list`: `result = {"type": "list", "answer": [r[0] for r in con.execute(...).fetchall()]}` (danh sách phẳng các chuỗi/số)
+   - `table`: `result = {"columns": ["cột 1", "cột 2"], "rows": [list(r) for r in con.execute(...).fetchall()]}`
    - `unanswerable`: `result = {"type": "unanswerable", "reason": "..."}`
 4. Chỉ trả về một khối mã ```python ... ``` duy nhất, không giải thích văn bản thừa."""
 
@@ -115,7 +118,7 @@ class QwenCoderClient:
         api_base: Optional[str] = None,
         api_key: Optional[str] = None,
         temperature: float = 0.0,
-        max_tokens: int = 768,
+        max_tokens: int = 384,
         request_timeout: float = 90.0,
         custom_generator: Optional[Callable[[List[Dict[str, str]]], str]] = None,
     ) -> None:
@@ -322,6 +325,7 @@ class DataMateAgent:
             data_root=data_root,
             cache_root=cache_root,
             timeout_seconds=sandbox_timeout,
+            store=self.store,
         )
         self.llm_client = llm_client
         self.max_retries = max_retries
@@ -344,6 +348,8 @@ class DataMateAgent:
         business_id = question_obj["business_id"]
 
         parts = [
+            schema_prompt,
+            f"=== LUẬT NGHIỆP VỤ LIÊN QUAN ===\n{rules_prompt}",
             f"=== CÂU HỎI CẦN GIẢI QUYẾT ===\n"
             f"- Mã câu hỏi: {question_obj.get('id', 'unknown')}\n"
             f"- Cửa hàng (`business_id`): {business_id}\n"
@@ -351,16 +357,15 @@ class DataMateAgent:
             f"- Câu hỏi: {question}\n"
             f"- Kiểu đáp án kỳ vọng (`expected_type`): {expected_type}",
             f"=== NGỮ CẢNH THỜI GIAN ĐÃ QUY ĐỔI ===\n{date_prompt}",
-            schema_prompt,
         ]
         if entity_hints:
             parts.append(entity_hints)
         if few_shot_prompt:
             parts.append(few_shot_prompt)
         parts.extend([
-            f"=== LUẬT NGHIỆP VỤ LIÊN QUAN ===\n{rules_prompt}",
             "=== YÊU CẦU SINH MÃ PYTHON ===\n"
             "Hãy viết mã Python truy vấn dữ liệu từ `tables` hoặc `con` DuckDB để tính ra kết quả chính xác.\n"
+            "Toàn bộ bảng dữ liệu đã nạp sẵn vào biến `con` và `tables`, không gọi `duckdb.connect()`.\n"
             f"Cuối đoạn code, bắt buộc gán `result = {{\"type\": \"...\", \"answer\": ...}}`."
         ])
         return "\n\n".join(parts)
@@ -516,6 +521,25 @@ class DataMateAgent:
             few_shot_prompt=few_shot_prompt,
         )
 
+        def _is_meaningful_pred(pred: Any) -> bool:
+            if not isinstance(pred, dict):
+                return False
+            ptype = pred.get("type")
+            if ptype not in ("number", "percent", "date", "string", "list", "table", "boolean", "unanswerable"):
+                return False
+            if ptype == "abstain":
+                return False
+            if ptype == "unanswerable":
+                return True
+            ans = pred.get("answer")
+            if ans is None:
+                return False
+            if isinstance(ans, str) and (not ans.strip() or ans.strip().lower() in ("none", "nan", "null")):
+                return False
+            if isinstance(ans, (list, tuple)) and len(ans) == 0:
+                return False
+            return True
+
         # Nếu cấu hình single prompt mode (chỉ Prompt 1)
         if self.consensus_mode == "single":
             pred1, code1, raw1 = self._solve_single_prompt(
@@ -529,11 +553,7 @@ class DataMateAgent:
                 question=question,
                 seed=42,
             )
-            p1_valid = (
-                isinstance(pred1, dict)
-                and pred1.get("type") in ("number", "percent", "date", "string", "list", "table", "boolean", "unanswerable")
-                and pred1.get("type") != "abstain"
-            )
+            p1_valid = _is_meaningful_pred(pred1)
             final_pred = pred1 if p1_valid else {"id": qid, "type": "abstain"}
             details = {
                 "id": qid,
@@ -583,16 +603,8 @@ class DataMateAgent:
             pred1, code1, raw1 = fut1.result()
             pred2, code2, raw2 = fut2.result()
 
-        p1_valid = (
-            isinstance(pred1, dict)
-            and pred1.get("type") in ("number", "percent", "date", "string", "list", "table", "boolean", "unanswerable")
-            and pred1.get("type") != "abstain"
-        )
-        p2_valid = (
-            isinstance(pred2, dict)
-            and pred2.get("type") in ("number", "percent", "date", "string", "list", "table", "boolean", "unanswerable")
-            and pred2.get("type") != "abstain"
-        )
+        p1_valid = _is_meaningful_pred(pred1)
+        p2_valid = _is_meaningful_pred(pred2)
 
         # 3. Phân cấp đồng thuận & Trọng tài tin cậy (Tiered Consensus Arbitration)
         is_consensus = False

@@ -93,8 +93,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-retries",
         type=int,
-        default=2,
-        help="Số lần tối đa tự sửa lỗi qua Sandbox Traceback (mặc định: 2).",
+        default=1,
+        help="Số lần tối đa tự sửa lỗi qua Sandbox Traceback (mặc định: 1).",
     )
     parser.add_argument(
         "--timeout",
@@ -127,8 +127,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=6,
-        help="Số lượng câu hỏi xử lý song song trên GPU continuous batching (mặc định: 6).",
+        default=3,
+        help="Số lượng câu hỏi xử lý song song trên GPU continuous batching (mặc định: 3).",
     )
     parser.add_argument(
         "--gold",
@@ -312,6 +312,10 @@ def main() -> None:
             completed_count += 1
 
     to_run = [(idx, q_obj) for idx, q_obj in enumerate(questions) if results[idx] is None]
+    # Sắp xếp câu hỏi theo business_id để kích hoạt tối đa vLLM Prefix Caching
+    # (Toàn bộ câu hỏi cùng shop có schema và rules đầu prompt giống nhau 100%, tái sử dụng KV cache)
+    # Thứ tự ghi ra results[idx] vẫn đảm bảo 100% khớp với file câu hỏi gốc.
+    to_run.sort(key=lambda item: (item[1].get("business_id", ""), item[0]))
     print(f"Bắt đầu chạy DataMate Pipeline trên {len(questions)} câu hỏi (Cần chạy mới: {len(to_run)} | Concurrency: {args.concurrency})...")
     print(f"Model: {llm_client.model_name} | Backend: {llm_client.backend} | Max Retries: {args.max_retries}")
 

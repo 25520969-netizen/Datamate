@@ -285,3 +285,132 @@ def test_consensus_semantic_token_difference_product_variants():
         {"type": "list", "answer": ["Bột giặt Omo"]},
         {"type": "list", "answer": ["Bột giặt Omo Matic"]},
     ) is False
+
+
+def test_postprocess_table_and_list_auto_conversions():
+    """Kiểm tra postprocess_and_guard tự động chuẩn hóa table dạng list-of-rows và list lồng nhau từ fetchall()."""
+    # 1. Table dạng list of rows [[name, val], ...]
+    raw_table = [["Lâm Bảo Ngọc", 632000], ["Nghiêm Duy Linh", 620000]]
+    res_table = postprocess_and_guard("q_tbl", "Top 2 khách nợ nhiều nhất?", raw_table, "table")
+    assert res_table["type"] == "table"
+    assert "columns" in res_table["answer"]
+    assert res_table["answer"]["rows"] == [["Lâm Bảo Ngọc", 632000], ["Nghiêm Duy Linh", 620000]]
+
+    # 2. Table có dòng header
+    raw_table_header = [["Khách hàng", "Số tiền nợ"], ["Lâm Bảo Ngọc", 632000], ["Nghiêm Duy Linh", 620000]]
+    res_tbl_h = postprocess_and_guard("q_tbl2", "Top 2 khách nợ nhiều nhất?", raw_table_header, "table")
+    assert res_tbl_h["type"] == "table"
+    assert res_tbl_h["answer"]["columns"] == ["Khách hàng", "Số tiền nợ"]
+    assert res_tbl_h["answer"]["rows"] == [["Lâm Bảo Ngọc", 632000], ["Nghiêm Duy Linh", 620000]]
+
+    # 3. List lồng nhau dạng [('A',), ('B',)] hoặc [['A'], ['B']]
+    raw_list_tuples = [("Panadol Extra hộp 15 vỉ x 12 viên",), ("Smecta hộp 30 gói",)]
+    res_list = postprocess_and_guard("q_list", "Các mặt hàng bán chạy nhất?", raw_list_tuples, "list")
+    assert res_list["type"] == "list"
+    assert res_list["answer"] == ["Panadol Extra hộp 15 vỉ x 12 viên", "Smecta hộp 30 gói"]
+
+    # 4. List dạng [[val1, val2]] (1 hàng nhiều cột)
+    raw_list_row = [[78000, 25000]]
+    res_row = postprocess_and_guard("q_list2", "Doanh thu tiền mặt và chuyển khoản?", raw_list_row, "list")
+    assert res_row["type"] == "list"
+    assert res_row["answer"] == [78000, 25000]
+
+
+def test_bidirectional_synonym_enrichment():
+    """Kiểm tra tính năng bổ sung synonym hai chiều của 11 họ cột chuẩn."""
+    df_sample = pd.DataFrame({
+        "Tên KH": ["Nguyễn Văn A"],
+        "SoCT": ["HD001"],
+        "Tên hàng": ["Bia Tiger"],
+        "MaHH": ["HH01"],
+        "NgayLap": ["2026-03-01"],
+        "TinhTrang": ["Hoàn thành"],
+        "ThanhTien": [50000],
+        "Nhom hang": ["Đồ uống"],
+        "HanSuDung": ["2027-01-01"],
+    })
+    tables = {"don_hang": df_sample}
+    enriched = BusinessDataStore._enrich_table_synonyms_and_id(tables, "biz_test")
+    res_df = enriched["don_hang"]
+
+    assert res_df["business_id"].iloc[0] == "biz_test"
+    assert "Khách hàng" in res_df.columns
+    assert "Tên khách" in res_df.columns
+    assert "Mã đơn hàng" in res_df.columns
+    assert "Mã hóa đơn" in res_df.columns
+    assert "Tên sản phẩm" in res_df.columns
+    assert "Mã sản phẩm" in res_df.columns
+    assert "Ngày" in res_df.columns
+    assert "Thời gian" in res_df.columns
+    assert "Trạng thái" in res_df.columns
+    assert "status_norm" in res_df.columns
+    assert "Thành tiền" in res_df.columns
+    assert "revenue_norm" in res_df.columns
+    assert "Nhóm hàng" in res_df.columns
+    assert "Loại sản phẩm" in res_df.columns
+    assert "Hạn sử dụng" in res_df.columns
+    assert "HSD" in res_df.columns
+
+
+def test_sandbox_intercepts_duckdb_connect_and_close(tmp_path):
+    """Kiểm tra sandbox tự động chặn import duckdb, redirect duckdb.connect() về safe_con và bỏ qua con.close()."""
+    # Tạo store giả lập với 1 shop biz_mock có bảng don_hang
+    biz_dir = tmp_path / "biz_mock"
+    biz_dir.mkdir(parents=True)
+    df = pd.DataFrame({
+        "Mã đơn hàng": ["DH01", "DH02"],
+        "Khách hàng": ["Khách A", "Khách B"],
+        "Thành tiền": [100000, 200000],
+    })
+    df.to_csv(biz_dir / "don_hang.csv", index=False)
+
+    store = BusinessDataStore(data_root=tmp_path, cache_root=tmp_path / ".cache")
+    sandbox = PythonSandbox(data_root=tmp_path, in_process=True, store=store)
+
+    # Đoạn code mô phỏng 100% mã lỗi mà LLM sinh ra
+    code = """
+import duckdb
+
+# LLM tự connect đến database khác
+con = duckdb.connect(database='pos.sqlite')
+
+query = "SELECT COUNT(*) AS total_orders, SUM(\\"Thành tiền\\") AS total_rev FROM \\"don_hang\\""
+df_res = con.execute(query).fetchdf()
+
+result = {
+    "type": "number",
+    "answer": float(df_res["total_rev"].iloc[0])
+}
+
+# LLM tự đóng kết nối
+con.close()
+"""
+    res = sandbox.execute(code=code, business_id="biz_mock", as_of_date="2026-03-01")
+    assert res["ok"] is True, f"Sandbox failed with error: {res.get('error')}"
+    assert res["result"] == {"type": "number", "answer": 300000.0}
+
+
+def test_sandbox_intercepts_from_duckdb_import_connect(tmp_path):
+    """Kiểm tra sandbox tự động chặn from duckdb import connect."""
+    biz_dir = tmp_path / "biz_mock2"
+    biz_dir.mkdir(parents=True)
+    df = pd.DataFrame({
+        "Mã đơn hàng": ["DH01"],
+        "Thành tiền": [50000],
+    })
+    df.to_csv(biz_dir / "don_hang.csv", index=False)
+
+    store = BusinessDataStore(data_root=tmp_path, cache_root=tmp_path / ".cache")
+    sandbox = PythonSandbox(data_root=tmp_path, in_process=True, store=store)
+
+    code = """
+from duckdb import connect
+c = connect('your_database.db')
+df_res = c.execute("SELECT COUNT(*) AS c FROM \\"don_hang\\"").fetchdf()
+result = int(df_res["c"].iloc[0])
+c.close()
+"""
+    res = sandbox.execute(code=code, business_id="biz_mock2", as_of_date="2026-03-01")
+    assert res["ok"] is True, f"Sandbox failed with error: {res.get('error')}"
+    assert res["result"] == 1
+

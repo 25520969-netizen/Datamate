@@ -163,6 +163,42 @@ def main() -> None:
                 args.data_root = candidate
                 break
 
+    # Tự động định vị file questions nếu đường dẫn tương đối không nằm tại cwd
+    if not args.questions.exists():
+        if (PROJECT_ROOT / args.questions).exists():
+            args.questions = PROJECT_ROOT / args.questions
+        else:
+            for p in [
+                Path("/content/drive/MyDrive/zaloAI/data") / args.questions,
+                Path("/content/drive/MyDrive/zaloAI") / args.questions,
+                Path("/content/drive/MyDrive") / args.questions,
+                Path("/content/drive/MyDrive") / args.questions.name,
+            ]:
+                if p.exists():
+                    args.questions = p
+                    break
+
+    # Tương tự tự động định vị file gold
+    if args.gold and not args.gold.exists():
+        if (PROJECT_ROOT / args.gold).exists():
+            args.gold = PROJECT_ROOT / args.gold
+        else:
+            for p in [
+                Path("/content/drive/MyDrive/zaloAI/data") / args.gold,
+                Path("/content/drive/MyDrive/zaloAI") / args.gold,
+                Path("/content/drive/MyDrive") / args.gold,
+                Path("/content/drive/MyDrive") / args.gold.name,
+            ]:
+                if p.exists():
+                    args.gold = p
+                    break
+
+    # Tự động định vị calendar và rulebook
+    if not args.calendar.exists() and (PROJECT_ROOT / args.calendar).exists():
+        args.calendar = PROJECT_ROOT / args.calendar
+    if not args.rulebook.exists() and (PROJECT_ROOT / args.rulebook).exists():
+        args.rulebook = PROJECT_ROOT / args.rulebook
+
     questions = load_jsonl(args.questions)
     if args.limit and args.limit > 0:
         questions = questions[: args.limit]

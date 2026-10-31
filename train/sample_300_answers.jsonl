@@ -1,0 +1,300 @@
+{"id": "q_0f6f50127e77", "type": "table", "answer": {"columns": ["khach_hang", "so_tien_no"], "rows": [["Lâm Bảo Ngọc", 632000], ["Nghiêm Duy Linh", 620000], ["Lương Huy Quang", 360500]]}, "alias": [["KH0027"], ["KH0097"], ["KH0112"]]}
+{"id": "q_0a76d3680594", "type": "table", "answer": {"columns": ["khach_hang", "so_tien_no"], "rows": [["Đỗ Đức An", 404500], ["Dương Tâm Bích", 158600], ["Phùng Hồng Nam", 126000], ["Bạch Dương Phúc", 116000], ["La Dương Thu", 92000]]}, "alias": [["KH0124"], ["KH0233"], ["KH0137"], ["KH0187"], ["KH0110"]]}
+{"id": "q_420556897d22", "type": "table", "answer": {"columns": ["khach_hang", "so_tien_no"], "rows": [["Thái Nam Phương", 151000], ["Vương Hằng Phúc", 117500], ["Trương Bình Nam", 116500]]}, "alias": [["KH0205"], ["KH0084"], ["KH0213", "Truong Binh Nam"]]}
+{"id": "q_d15bde861202", "type": "table", "answer": {"columns": ["khach_hang", "so_tien_no"], "rows": [["Ông Quang Hoàng", 145500], ["Tô Quân Bình", 125500], ["Từ Hải Thanh", 123000], ["Võ Tâm Phong", 111000], ["Vũ Khánh Tâm", 101000]]}, "alias": [["KH0098"], ["KH0078"], ["KH0165", "Từ Hải Thanh 0359470831"], ["KH0106"], ["KH0090", "Vũ Khánh Tâm (0914849701)"]]}
+{"id": "q_8f503c0b707e", "type": "table", "answer": {"columns": ["khach_hang", "so_tien_no"], "rows": [["Quách Trang Nhung", 368000], ["Nghiêm Dương Khoa", 193900], ["Tô Chi Huy", 112267]]}, "alias": [["KH0343"], ["KH0365", "Nghiem Duong Khoa"], ["KH0025"]]}
+{"id": "q_8423c5cc4a42", "type": "table", "answer": {"columns": ["khach_hang", "so_tien_no"], "rows": [["Bạch Giang Sơn", 2309400], ["Tạ Hiếu Thu", 1025500], ["Doãn Tâm Nam", 901667]]}, "alias": [["KH0085"], ["KH0203", "Ta Hieu Thu"], ["KH0291"]]}
+{"id": "q_8659862171ab", "type": "table", "answer": {"columns": ["khach_hang", "so_tien_no"], "rows": [["Thân Thu Phương", 949334], ["Ngô Anh Phong", 415000], ["Nghiêm Hà Phương", 391000], ["Hứa An Giang", 356250], ["Châu Quân Tâm", 241000]]}, "alias": [["KH0104"], ["KH0050"], ["KH0150"], ["KH0125"], ["KH0048"]]}
+{"id": "q_995dd5d94d45", "type": "table", "answer": {"columns": ["khach_hang", "so_tien_no"], "rows": [["Thái Nam Phương", 151000], ["Vương Hằng Phúc", 117500], ["Trương Bình Nam", 116500], ["Lưu Phong Bình", 98000], ["Vũ Nhung Trung", 94000]]}, "alias": [["KH0205"], ["KH0084"], ["KH0213", "Truong Binh Nam"], ["KH0178", "Lưu Phong Bình - 0978 611 903"], ["KH0162", "Vu Nhung Trung"]]}
+{"id": "q_ecdbd349e0b2", "type": "table", "answer": {"columns": ["khach_hang", "so_tien_no"], "rows": [["Ông Quang Hoàng", 145500], ["Tô Quân Bình", 125500], ["Từ Hải Thanh", 123000]]}, "alias": [["KH0098"], ["KH0078"], ["KH0165", "Từ Hải Thanh 0359470831"]]}
+{"id": "q_1a11488ed8c6", "type": "table", "answer": {"columns": ["khach_hang", "so_tien_no"], "rows": [["Phạm Phong Hoàng", 243000], ["Đàm Ngọc Trung", 210100], ["Kiều Trung Nam", 151600]]}, "alias": [["KH0285"], ["KH0329"], ["KH0320"]]}
+{"id": "q_b4a4c7135e0a", "type": "boolean", "answer": true, "alias": []}
+{"id": "q_89dbb79d6e8c", "type": "boolean", "answer": false, "alias": []}
+{"id": "q_83ddbda300ed", "type": "boolean", "answer": false, "alias": []}
+{"id": "q_c26a816e7c91", "type": "boolean", "answer": false, "alias": []}
+{"id": "q_7c42bbc16fde", "type": "boolean", "answer": true, "alias": []}
+{"id": "q_5b66ecfa2ba0", "type": "boolean", "answer": true, "alias": []}
+{"id": "q_9bc44da7a632", "type": "boolean", "answer": true, "alias": []}
+{"id": "q_d9f6efd2a92c", "type": "boolean", "answer": true, "alias": []}
+{"id": "q_e210942807ec", "type": "boolean", "answer": true, "alias": []}
+{"id": "q_70d78d0a36ff", "type": "boolean", "answer": true, "alias": []}
+{"id": "q_eabd0d408998", "type": "boolean", "answer": false, "alias": []}
+{"id": "q_c8273e950235", "type": "boolean", "answer": false, "alias": []}
+{"id": "q_aad0778d5fd7", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_ebf285497536", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_d345bddf40bc", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_f120d0f5e7d0", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_88f914de4454", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_88e1971e99bf", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_ef173115902d", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_f6b6cc0cbd2b", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_cd7bfdbf4d08", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_2407aef28946", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_97049319d8e8", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_72d9f77acc3d", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_e054949c8650", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_a4560b62b198", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_03a446be8b75", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_4333ad0589a1", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_fcafb39ec35f", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_b2f158b6c3f9", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_ea69ed45df1c", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_e9455734edd3", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_ec5c0d7eed96", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_ec52b91bfbd0", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_ad432d1062b7", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_910640a29988", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_f7cbf061f59d", "type": "unanswerable", "answer": null, "alias": []}
+{"id": "q_230963509814", "type": "string", "answer": "NV001", "alias": []}
+{"id": "q_ed929e98cc18", "type": "string", "answer": "Vương Phúc Dương", "alias": []}
+{"id": "q_02eb42db6665", "type": "string", "answer": "Bia Tiger lon", "alias": []}
+{"id": "q_8a8fd459a0a3", "type": "string", "answer": "Thân Giang Giang", "alias": []}
+{"id": "q_38e2b6cef714", "type": "string", "answer": "Mì Hảo Hảo tôm chua cay", "alias": []}
+{"id": "q_233670084b6f", "type": "string", "answer": "Bia Tiger Bạc lon", "alias": []}
+{"id": "q_3ec323f48d62", "type": "string", "answer": "Kiều Khoa Thu", "alias": []}
+{"id": "q_79f9c340442f", "type": "string", "answer": "Xi măng Hà Tiên PCB40 bao 50kg", "alias": []}
+{"id": "q_1837da83c4a5", "type": "string", "answer": "Tạ Quang Khánh", "alias": ["KH0116"]}
+{"id": "q_e77db4a8781d", "type": "string", "answer": "Vũ Châu Mai", "alias": ["KH0174"]}
+{"id": "q_00d4d6380d03", "type": "string", "answer": "Gạch ống 8x8x18 Tuynel", "alias": []}
+{"id": "q_36f450727089", "type": "string", "answer": "Mì Hảo Hảo tôm chua cay", "alias": []}
+{"id": "q_ae8cac0f4316", "type": "string", "answer": "Doãn Nhung Quang", "alias": ["KH0182", "Doan Nhung Quang"]}
+{"id": "q_88f4eaa9981e", "type": "string", "answer": "Đặng Ngọc Đạt", "alias": []}
+{"id": "q_a466e64f5e76", "type": "string", "answer": "Cao Bình Dương", "alias": ["KH0130"]}
+{"id": "q_a6fba90a03ca", "type": "string", "answer": "Xi măng INSEE Power-S bao 50kg", "alias": []}
+{"id": "q_b09ceaeabdc5", "type": "string", "answer": "Quách Phúc Hải", "alias": ["KH0047"]}
+{"id": "q_e60d392f5f7a", "type": "string", "answer": "Tăng Mai Quân", "alias": ["KH0200"]}
+{"id": "q_3e57e05816fb", "type": "string", "answer": "Xi măng Hà Tiên PCB40 bao 50kg", "alias": []}
+{"id": "q_e25776b49e09", "type": "string", "answer": "Rau muống xào tỏi", "alias": []}
+{"id": "q_e3a84595133f", "type": "string", "answer": "Vũ Quân Hằng", "alias": ["KH0166"]}
+{"id": "q_a264d94a0492", "type": "string", "answer": "Snack Oishi tôm cay 40g", "alias": []}
+{"id": "q_3919f65b83aa", "type": "string", "answer": "Bia Tiger Bạc lon", "alias": []}
+{"id": "q_b90cd35c2d5c", "type": "string", "answer": "Hứa Nhung Dương", "alias": ["KH0105"]}
+{"id": "q_bf2e7c7baac7", "type": "string", "answer": "Tạ Giang Phúc", "alias": ["KH0073"]}
+{"id": "q_5268e64fb415", "type": "string", "answer": "Bia Heineken lon", "alias": []}
+{"id": "q_239ed3fe4a45", "type": "string", "answer": "Panadol Extra hộp 15 vỉ x 12 viên", "alias": ["SP0001"]}
+{"id": "q_9cffc3664c62", "type": "string", "answer": "Xi măng Hà Tiên PCB40 bao 50kg", "alias": []}
+{"id": "q_341141d1a85c", "type": "string", "answer": "Kiều Hiếu Thắng", "alias": ["KH0015", "Kieu Hieu Thang"]}
+{"id": "q_d687b5ea56de", "type": "string", "answer": "Nguyễn An Hiếu", "alias": ["KH0187"]}
+{"id": "q_e8370dc3aa1f", "type": "date", "answer": "2026-02-11", "alias": []}
+{"id": "q_438bfe9d843a", "type": "date", "answer": "2026-03-26", "alias": []}
+{"id": "q_57cd2bc2320b", "type": "date", "answer": "2026-01-12", "alias": []}
+{"id": "q_a98ebd61ce5e", "type": "date", "answer": "2025-12-05", "alias": []}
+{"id": "q_5ec3109a5561", "type": "date", "answer": "2025-07-28", "alias": []}
+{"id": "q_d3dc6983c14d", "type": "date", "answer": "2025-07-27", "alias": []}
+{"id": "q_456f5db25a6d", "type": "date", "answer": "2026-05-28", "alias": []}
+{"id": "q_bc18dfcaca8b", "type": "date", "answer": "2025-05-13", "alias": []}
+{"id": "q_a4f18c88e91e", "type": "date", "answer": "2026-02-08", "alias": []}
+{"id": "q_dd898501d52f", "type": "date", "answer": "2025-01-05", "alias": []}
+{"id": "q_0c81523c1028", "type": "date", "answer": "2025-02-23", "alias": []}
+{"id": "q_59fe1e80340f", "type": "date", "answer": "2026-04-01", "alias": []}
+{"id": "q_36e497167542", "type": "date", "answer": "2025-10-04", "alias": []}
+{"id": "q_954ab36d643c", "type": "date", "answer": "2026-01-29", "alias": []}
+{"id": "q_e658a5d9646a", "type": "date", "answer": "2026-04-25", "alias": []}
+{"id": "q_4e75fd94c469", "type": "date", "answer": "2025-09-30", "alias": []}
+{"id": "q_491e14aa5b72", "type": "date", "answer": "2025-08-31", "alias": []}
+{"id": "q_e65da358fdc9", "type": "date", "answer": "2025-08-01", "alias": []}
+{"id": "q_cd191850b1fb", "type": "date", "answer": "2026-03-14", "alias": []}
+{"id": "q_269c0b4a7a90", "type": "date", "answer": "2025-09-01", "alias": []}
+{"id": "q_311687ae2c21", "type": "date", "answer": "2025-11-15", "alias": []}
+{"id": "q_88c8483da44a", "type": "date", "answer": "2026-03-22", "alias": []}
+{"id": "q_94bfa97928af", "type": "date", "answer": "2025-10-03", "alias": []}
+{"id": "q_bc49bb9a2d10", "type": "date", "answer": "2025-03-05", "alias": []}
+{"id": "q_0496b83ca7c4", "type": "date", "answer": "2026-07-29", "alias": []}
+{"id": "q_b1feb7411099", "type": "date", "answer": "2028-11-20", "alias": []}
+{"id": "q_70bb43f64fb5", "type": "date", "answer": "2025-12-29", "alias": []}
+{"id": "q_14d7decc3d79", "type": "date", "answer": "2025-11-30", "alias": []}
+{"id": "q_1dbb93afc51e", "type": "date", "answer": "2026-04-25", "alias": []}
+{"id": "q_e0aef192cb11", "type": "date", "answer": "2026-06-01", "alias": []}
+{"id": "q_3f7dc57965db", "type": "list", "answer": ["Khẩu trang y tế 4 lớp Khánh An hộp 50 cái", "Prednisolon 5mg Boston chai 500 viên", "Hapacol 250 hộp 24 gói"], "alias": [["SP0011"], ["SP0060"], ["SP0002"]]}
+{"id": "q_20229203ac89", "type": "list", "answer": ["Ông Giang Tâm", "Lưu Đạt Hạnh", "Vương Long Phúc"], "alias": [[], [], []]}
+{"id": "q_426baab167a3", "type": "list", "answer": [78000, 25000], "alias": []}
+{"id": "q_ab998f9ea093", "type": "list", "answer": ["Otrivin 0,1% xịt mũi chai 10ml", "Nhiệt kế điện tử Microlife MT500", "Savi Losartan 50mg hộp 3 vỉ x 10 viên", "Enat 400 hộp 3 vỉ x 10 viên nang", "Kẹo ngậm Bổ phế Nam Hà Candy hộp 10 vỉ x 8 viên"], "alias": [["SP0038", "Otrivin 0,1% xit mui chai 10ml"], ["SP0075"], ["SP0052"], ["SP0072"], ["SP0074", "Keo ngam Bo phe Nam Ha Candy hop 10 vi x 8 vien"]]}
+{"id": "q_b4be1da8a3d6", "type": "list", "answer": ["Cà phê sữa (M)", "Cà phê đen (M)", "Trà đào cam sả (M)"], "alias": [[], [], []]}
+{"id": "q_d2c5d949e232", "type": "list", "answer": [194600, 22400], "alias": []}
+{"id": "q_866bfa9392b7", "type": "list", "answer": ["Panadol 500mg hộp 10 vỉ x 12 viên", "Panadol Extra hộp 15 vỉ x 12 viên", "Khẩu trang y tế 4 lớp Khánh An hộp 50 cái", "Smecta hộp 30 gói", "Hapacol 250 hộp 24 gói"], "alias": [["SP0003", "Panadol 500mg hop 10 vi x 12 vien", "Panadol 500 mg hộp 10 vỉ x 12 viên"], ["SP0001"], ["SP0011", "Khau trang y te 4 lop Khanh An hop 50 cai"], ["SP0012"], ["SP0002"]]}
+{"id": "q_6b90b5fe0a20", "type": "list", "answer": [9788500, 156637000], "alias": []}
+{"id": "q_2b300a0c0e75", "type": "list", "answer": ["Bia Tiger lon", "Bia Sài Gòn Special lon", "Rau muống xào tỏi", "Bia Tiger Bạc lon", "Cánh gà chiên nước mắm"], "alias": [["SP0002"], ["SP0006"], ["SP0001", "Rau muong xao toi"], ["SP0014", "Bia Tiger Bac lon"], ["SP0003"]]}
+{"id": "q_fe14e521d3e0", "type": "list", "answer": [8, 9], "alias": []}
+{"id": "q_31e60bdd4d2f", "type": "list", "answer": [1634900, 33118400], "alias": []}
+{"id": "q_cff4d074d1f3", "type": "list", "answer": [2800, 1866], "alias": []}
+{"id": "q_9b2a114d379f", "type": "list", "answer": [331125000, 323108000, 338062000], "alias": []}
+{"id": "q_6af0bd86e70d", "type": "list", "answer": ["Decolgen Forte hộp 30 vỉ x 4 viên", "Khẩu trang y tế 4 lớp Khánh An hộp 50 cái", "Hapacol 250 hộp 24 gói"], "alias": [["SP0010"], ["SP0011", "Khau trang y te 4 lop Khanh An hop 50 cai"], ["SP0002"]]}
+{"id": "q_6498fc77c501", "type": "list", "answer": ["Chung Mai Châu", "Đoàn Bích Khoa", "Hứa Bích An", "Trần Mai Dũng", "Nguyễn Hoa Trang"], "alias": [["KH0300", "Chung Mai Châu (0932254793)"], ["KH0148", "Đoàn Bích Khoa 0914717486"], ["KH0063", "Hua Bich An"], ["KH0020"], ["KH0187"]]}
+{"id": "q_997c474ebf21", "type": "list", "answer": [207979500, 12071000], "alias": []}
+{"id": "q_5055becf7714", "type": "list", "answer": ["Vương Phương Loan", "Kiều Hà Tâm", "Đào Dương Giang"], "alias": [["KH0185", "Vương Phương Loan - 0973 189 069"], ["KH0074", "Kiều Hà Tâm - 0324 774 167"], ["KH0002", "Đào Dương Giang - 0912 365 003"]]}
+{"id": "q_6d6f14c7978d", "type": "list", "answer": [1454703600, 1442924600, 1627106800], "alias": []}
+{"id": "q_2a79a2115ada", "type": "list", "answer": ["Siro ho Bổ phế Nam Hà Chỉ Khái Lộ chai 125ml", "Siro ho cảm Ích Nhi chai 90ml", "Voltaren Emulgel 1% tuýp 20g", "Metformin Stella 500mg hộp 6 vỉ x 10 viên", "Magne-B6 Corbière hộp 5 vỉ x 10 viên", "Otrivin 0,1% xịt mũi chai 10ml", "Amoxicillin 500mg Domesco hộp 10 vỉ x 10 viên", "Alaxan hộp 25 vỉ x 4 viên", "Savi Losartan 50mg hộp 3 vỉ x 10 viên", "Clorpheniramin 4mg DHG hộp 10 vỉ x 20 viên", "Bio-acimin Gold men vi sinh hộp 30 gói"], "alias": [["SP0040"], ["SP0058"], ["SP0055"], ["SP0045"], ["SP0041"], ["SP0038"], ["SP0008"], ["SP0029"], ["SP0052"], ["SP0016"], ["SP0064"]]}
+{"id": "q_2225d390b8bb", "type": "list", "answer": ["Kiều Bảo Khoa", "Huỳnh Phúc Huy", "Phan Hạnh Khoa"], "alias": [[], [], []]}
+{"id": "q_84800ceb36a8", "type": "list", "answer": ["Bia Tiger lon", "Bia Sài Gòn Special lon", "Bia Tiger Bạc lon", "Coca-Cola lon", "Nước suối"], "alias": [["SP0002"], ["SP0006"], ["SP0014"], ["SP0010"], ["SP0018"]]}
+{"id": "q_afbe1c75c766", "type": "list", "answer": ["Đoàn Mai Hồng", "Trương Hồng Lan", "Vũ Bảo Hạnh", "Tạ Chi Đức", "Hồ Linh Khoa"], "alias": [["KH0247"], ["KH0078"], ["KH0294"], ["KH0210", "Ta Chi Duc"], ["KH0137", "Ho Linh Khoa"]]}
+{"id": "q_5d9f6550bb9c", "type": "list", "answer": ["Mì Hảo Hảo tôm chua cay", "Snack Oishi tôm cay 40g", "Trứng gà so", "Mì Omachi sườn hầm", "Snack Lay's vị tự nhiên 56g"], "alias": [[], [], [], [], []]}
+{"id": "q_a32b374fb3e9", "type": "list", "answer": ["Cà phê sữa (M)", "Cà phê đen (M)", "Trà đào cam sả (M)"], "alias": [[], [], []]}
+{"id": "q_4f742bfda263", "type": "list", "answer": ["Thái Sơn Sơn", "Đỗ Bảo Long", "Đỗ Duy Khánh", "Tống Hùng Minh", "Phan Hải Phúc"], "alias": [[], [], [], [], []]}
+{"id": "q_9c77a00e8131", "type": "list", "answer": [1249474500, 1332037000, 1312108000], "alias": []}
+{"id": "q_773310350f81", "type": "list", "answer": ["Cà phê sữa (M)", "Trà đào cam sả (M)", "Cà phê đen (M)"], "alias": [[], [], []]}
+{"id": "q_270c4da7ec27", "type": "list", "answer": ["Tạ Phúc Đức", "Hồ Long Duy", "Lý Châu Bảo"], "alias": [[], [], []]}
+{"id": "q_3fc34d6baada", "type": "list", "answer": [16, 9], "alias": []}
+{"id": "q_d51ebe36aad3", "type": "list", "answer": ["La Thảo Ngân", "Ngô Minh Dũng", "Vũ Hồng Anh"], "alias": [["KH0160"], ["KH0137"], ["KH0006"]]}
+{"id": "q_26f9e148ca7f", "type": "list", "answer": ["Xi măng Hà Tiên PCB40 bao 50kg", "Lưới B40 mạ kẽm khổ 1.5m", "Gạch ống 8x8x18 Tuynel"], "alias": [["SP0001"], ["SP0036"], ["SP0009"]]}
+{"id": "q_2e8a1220169c", "type": "list", "answer": ["Triệu Cường Thanh", "Nghiêm Bình Hằng", "Triệu Mai Huy", "Châu Châu Anh", "Tạ Quang Khánh"], "alias": [["KH0130"], ["KH0143"], ["KH0062"], ["KH0139"], ["KH0116"]]}
+{"id": "q_7549dd8eaf58", "type": "list", "answer": ["Bia Tiger lon", "Bia Sài Gòn Special lon", "Cánh gà chiên nước mắm"], "alias": [["SP0002"], ["SP0006"], ["SP0003"]]}
+{"id": "q_3b1947e15f4d", "type": "list", "answer": ["Xi măng Hà Tiên PCB40 bao 50kg", "Xi măng INSEE Power-S bao 50kg", "Băng keo điện Nano 20 yard"], "alias": [["SP0001"], ["SP0002"], ["SP0033"]]}
+{"id": "q_79281eb9a5e5", "type": "list", "answer": [16, 1], "alias": []}
+{"id": "q_b276ba56b8b1", "type": "percent", "answer": -2.05, "alias": []}
+{"id": "q_b5bd23f316e7", "type": "percent", "answer": 1.32, "alias": []}
+{"id": "q_307ac5840cca", "type": "percent", "answer": 3.7, "alias": []}
+{"id": "q_54b11019393a", "type": "percent", "answer": 9.04, "alias": []}
+{"id": "q_bd2d824bb0a9", "type": "percent", "answer": 19.13, "alias": []}
+{"id": "q_5c9cf907f474", "type": "percent", "answer": 6.24, "alias": []}
+{"id": "q_5f5c3b11314d", "type": "percent", "answer": -14.45, "alias": []}
+{"id": "q_2d8aea0f27af", "type": "percent", "answer": 2.89, "alias": []}
+{"id": "q_ee0f5dce73bd", "type": "percent", "answer": 14.37, "alias": []}
+{"id": "q_fee5b1d42b55", "type": "percent", "answer": 40.3, "alias": []}
+{"id": "q_99e7b472e05e", "type": "percent", "answer": 29.79, "alias": []}
+{"id": "q_a954a482d4bf", "type": "percent", "answer": 1.96, "alias": []}
+{"id": "q_baa0ec03e542", "type": "percent", "answer": 26.03, "alias": []}
+{"id": "q_46e5d20e6422", "type": "percent", "answer": -4.73, "alias": []}
+{"id": "q_784bf8f76796", "type": "percent", "answer": -7.23, "alias": []}
+{"id": "q_0f4e7cdb3ce5", "type": "percent", "answer": 1.91, "alias": []}
+{"id": "q_cae71fd736b0", "type": "percent", "answer": 1.05, "alias": []}
+{"id": "q_ca469cc6d8c0", "type": "percent", "answer": 5.96, "alias": []}
+{"id": "q_2be345d37d89", "type": "percent", "answer": -8.51, "alias": []}
+{"id": "q_4cbb6b73939c", "type": "percent", "answer": 39.21, "alias": []}
+{"id": "q_33c1739f7daf", "type": "percent", "answer": 13.87, "alias": []}
+{"id": "q_0e96d244ad69", "type": "percent", "answer": 2.25, "alias": []}
+{"id": "q_552e6967dbc6", "type": "percent", "answer": 1.3, "alias": []}
+{"id": "q_d4f8f031e663", "type": "percent", "answer": 17.19, "alias": []}
+{"id": "q_f1fe75cfb100", "type": "percent", "answer": 19.21, "alias": []}
+{"id": "q_12829de2ae90", "type": "percent", "answer": 9.75, "alias": []}
+{"id": "q_db575cf29bdc", "type": "percent", "answer": 9.17, "alias": []}
+{"id": "q_b9a27b8f42d1", "type": "percent", "answer": 1.79, "alias": []}
+{"id": "q_b946d3a969a0", "type": "percent", "answer": 15.25, "alias": []}
+{"id": "q_4afebc6d1d4b", "type": "percent", "answer": 16.99, "alias": []}
+{"id": "q_60cf9bf3b9b5", "type": "percent", "answer": 11.09, "alias": []}
+{"id": "q_eef55227353d", "type": "percent", "answer": 23.02, "alias": []}
+{"id": "q_e31699330b55", "type": "percent", "answer": 3.36, "alias": []}
+{"id": "q_57cfd4ad4045", "type": "percent", "answer": -15.1, "alias": []}
+{"id": "q_226d90b72c7c", "type": "percent", "answer": -22.51, "alias": []}
+{"id": "q_7b7e9b737498", "type": "percent", "answer": 17.62, "alias": []}
+{"id": "q_e4af6840f35a", "type": "percent", "answer": 19.76, "alias": []}
+{"id": "q_3400f2bffb00", "type": "percent", "answer": 35.17, "alias": []}
+{"id": "q_ce9e622a3fff", "type": "percent", "answer": 42.14, "alias": []}
+{"id": "q_18adf5dc2e3f", "type": "percent", "answer": 6.8, "alias": []}
+{"id": "q_b3b16e699a67", "type": "percent", "answer": -6.36, "alias": []}
+{"id": "q_735d09a7e75a", "type": "percent", "answer": 6.77, "alias": []}
+{"id": "q_fcfafaa99bb4", "type": "percent", "answer": -1.43, "alias": []}
+{"id": "q_e6dd8fd4a42a", "type": "percent", "answer": 13.95, "alias": []}
+{"id": "q_f750d1f1110c", "type": "percent", "answer": -12.94, "alias": []}
+{"id": "q_d05886ff8883", "type": "percent", "answer": -0.53, "alias": []}
+{"id": "q_bf862acc15f6", "type": "percent", "answer": -14.87, "alias": []}
+{"id": "q_110238617caa", "type": "percent", "answer": -0.8, "alias": []}
+{"id": "q_f4c328691e9b", "type": "percent", "answer": -32.31, "alias": []}
+{"id": "q_a8aeb33b648d", "type": "percent", "answer": 10.82, "alias": []}
+{"id": "q_583e4896e764", "type": "percent", "answer": 5.79, "alias": []}
+{"id": "q_5178da2e9933", "type": "percent", "answer": 1.63, "alias": []}
+{"id": "q_8af350dfb3b7", "type": "percent", "answer": 11.49, "alias": []}
+{"id": "q_a13ada2f56f5", "type": "percent", "answer": 4.85, "alias": []}
+{"id": "q_0872d9f34f31", "type": "percent", "answer": -31.57, "alias": []}
+{"id": "q_fe07ca19cfd8", "type": "percent", "answer": 12.59, "alias": []}
+{"id": "q_fcdacd705ef0", "type": "percent", "answer": 3.45, "alias": []}
+{"id": "q_b6e73ed9e8e4", "type": "percent", "answer": -20.88, "alias": []}
+{"id": "q_a64113ee527a", "type": "number", "answer": 172, "alias": []}
+{"id": "q_2d2b39ab0b27", "type": "number", "answer": 31, "alias": []}
+{"id": "q_df88bdab431d", "type": "number", "answer": 29100000, "alias": []}
+{"id": "q_c7889c583f91", "type": "number", "answer": 784196000, "alias": []}
+{"id": "q_72c84fa63b2a", "type": "number", "answer": 5002000, "alias": []}
+{"id": "q_5a4ddd83bd1c", "type": "number", "answer": 137, "alias": []}
+{"id": "q_a35033f903d1", "type": "number", "answer": 10, "alias": []}
+{"id": "q_ebdf2a0cd67e", "type": "number", "answer": 34496000, "alias": []}
+{"id": "q_9c455280e2d6", "type": "number", "answer": 32, "alias": []}
+{"id": "q_9a9d18b10b6e", "type": "number", "answer": 21, "alias": []}
+{"id": "q_5950425c2059", "type": "number", "answer": 528715000, "alias": []}
+{"id": "q_4430336c14f1", "type": "number", "answer": 1040000, "alias": []}
+{"id": "q_483fd47f80e8", "type": "number", "answer": 79, "alias": []}
+{"id": "q_2673cb45d798", "type": "number", "answer": 50, "alias": []}
+{"id": "q_ff3228d2c270", "type": "number", "answer": 5151900, "alias": []}
+{"id": "q_7f3deaf5a67d", "type": "number", "answer": 38210900, "alias": []}
+{"id": "q_acb4ea37b9d0", "type": "number", "answer": 14005000, "alias": []}
+{"id": "q_083211e2c80c", "type": "number", "answer": 2496270800, "alias": []}
+{"id": "q_304334cb3717", "type": "number", "answer": 187, "alias": []}
+{"id": "q_5128ae09fefb", "type": "number", "answer": 27, "alias": []}
+{"id": "q_7c8afb8a81e9", "type": "number", "answer": 45, "alias": []}
+{"id": "q_678e3a10c525", "type": "number", "answer": 9784000, "alias": []}
+{"id": "q_897a219802fe", "type": "number", "answer": 25741000, "alias": []}
+{"id": "q_2e6c7ad83383", "type": "number", "answer": 61, "alias": []}
+{"id": "q_c86e099eb394", "type": "number", "answer": 79, "alias": []}
+{"id": "q_c9193a5bc039", "type": "number", "answer": 72, "alias": []}
+{"id": "q_20c6e10447cf", "type": "number", "answer": 49852400, "alias": []}
+{"id": "q_bbdd76a5546c", "type": "number", "answer": 163, "alias": []}
+{"id": "q_f50a0876a46e", "type": "number", "answer": 5420500, "alias": []}
+{"id": "q_1e71135c8374", "type": "number", "answer": 7991100, "alias": []}
+{"id": "q_14693fd38657", "type": "number", "answer": 24, "alias": []}
+{"id": "q_43bd8e35df66", "type": "number", "answer": 3823800, "alias": []}
+{"id": "q_5285ebdeb1bf", "type": "number", "answer": 1080551000, "alias": []}
+{"id": "q_77b5d0d4b2df", "type": "number", "answer": 74104500, "alias": []}
+{"id": "q_a666a74dcbea", "type": "number", "answer": 5, "alias": []}
+{"id": "q_2bf6b2b1b7b7", "type": "number", "answer": 296157500, "alias": []}
+{"id": "q_b2c4cf5e2a8f", "type": "number", "answer": 115, "alias": []}
+{"id": "q_a9305e207d35", "type": "number", "answer": 3879, "alias": []}
+{"id": "q_f969bd7ed482", "type": "number", "answer": 232535600, "alias": []}
+{"id": "q_d5e6651d3fb6", "type": "number", "answer": 1600, "alias": []}
+{"id": "q_b40341e4b81b", "type": "number", "answer": 68000, "alias": []}
+{"id": "q_08403edda3c7", "type": "number", "answer": 1694000, "alias": []}
+{"id": "q_4bf431361cac", "type": "number", "answer": 113, "alias": []}
+{"id": "q_ce98842bb9b6", "type": "number", "answer": 129, "alias": []}
+{"id": "q_bbabfdd1ebd7", "type": "number", "answer": 14412000, "alias": []}
+{"id": "q_daa477dd5e4a", "type": "number", "answer": 33, "alias": []}
+{"id": "q_af5a0d2292fd", "type": "number", "answer": 32888700, "alias": []}
+{"id": "q_cb717b3a7e7c", "type": "number", "answer": 101603, "alias": []}
+{"id": "q_3848d4161b32", "type": "number", "answer": 621732100, "alias": []}
+{"id": "q_bb45251d72b7", "type": "number", "answer": 67, "alias": []}
+{"id": "q_87d9230ff9e9", "type": "number", "answer": 109636000, "alias": []}
+{"id": "q_0c4f869d0e49", "type": "number", "answer": 5560800, "alias": []}
+{"id": "q_39862a30b7df", "type": "number", "answer": 2582, "alias": []}
+{"id": "q_6821f6e7e582", "type": "number", "answer": 1195162900, "alias": []}
+{"id": "q_c2fc8ca094e5", "type": "number", "answer": 80, "alias": []}
+{"id": "q_7aa8bcb83116", "type": "number", "answer": 70834, "alias": []}
+{"id": "q_d915d5dbd1d0", "type": "number", "answer": 135090600, "alias": []}
+{"id": "q_3e3c35cd87c6", "type": "number", "answer": 30, "alias": []}
+{"id": "q_287ada14fabf", "type": "number", "answer": 321252600, "alias": []}
+{"id": "q_0ddb6dcd7d01", "type": "number", "answer": 6030000, "alias": []}
+{"id": "q_1c09918a7b72", "type": "number", "answer": 41, "alias": []}
+{"id": "q_314e13662297", "type": "number", "answer": 246242900, "alias": []}
+{"id": "q_5214682a5c4f", "type": "number", "answer": 19880000, "alias": []}
+{"id": "q_1ab03eb1b95b", "type": "number", "answer": 1526413100, "alias": []}
+{"id": "q_0dea4845a4cd", "type": "number", "answer": 62, "alias": []}
+{"id": "q_bbd22de66e7e", "type": "number", "answer": 27, "alias": []}
+{"id": "q_7fe322c8fff9", "type": "number", "answer": 7574100, "alias": []}
+{"id": "q_bbf707d184af", "type": "number", "answer": 104880600, "alias": []}
+{"id": "q_ba35baf50768", "type": "number", "answer": 90, "alias": []}
+{"id": "q_222e5130802b", "type": "number", "answer": 435686000, "alias": []}
+{"id": "q_4f3e9153b2b0", "type": "number", "answer": 26, "alias": []}
+{"id": "q_ada0c8273f7d", "type": "number", "answer": 40, "alias": []}
+{"id": "q_adf5fdb1d75f", "type": "number", "answer": 158819, "alias": []}
+{"id": "q_56724d89c623", "type": "number", "answer": 35, "alias": []}
+{"id": "q_71f5dee2b82b", "type": "number", "answer": 7294000, "alias": []}
+{"id": "q_353b11adef47", "type": "number", "answer": 16372, "alias": []}
+{"id": "q_a149a00151dd", "type": "number", "answer": 8125158, "alias": []}
+{"id": "q_158b312e8f5b", "type": "number", "answer": 1523470700, "alias": []}
+{"id": "q_eba1987c1f68", "type": "number", "answer": 397679600, "alias": []}
+{"id": "q_6257a245a516", "type": "number", "answer": 2377375000, "alias": []}
+{"id": "q_8c6d83185401", "type": "number", "answer": 88766800, "alias": []}
+{"id": "q_0dca3f5299ba", "type": "number", "answer": 1423804300, "alias": []}
+{"id": "q_8063763ff391", "type": "number", "answer": 1004447500, "alias": []}
+{"id": "q_e1786165de4a", "type": "number", "answer": 5693000, "alias": []}
+{"id": "q_fb027741b529", "type": "number", "answer": 34620000, "alias": []}
+{"id": "q_674d53d4124d", "type": "number", "answer": 60819200, "alias": []}
+{"id": "q_8b982f92eff1", "type": "number", "answer": 37, "alias": []}
+{"id": "q_607f89f0a1de", "type": "number", "answer": 0, "alias": []}
+{"id": "q_9265fdb4154b", "type": "number", "answer": 41, "alias": []}
+{"id": "q_13ff20df10e5", "type": "number", "answer": 417375400, "alias": []}
+{"id": "q_796cdbc9ba34", "type": "number", "answer": 1704759500, "alias": []}
+{"id": "q_2033f8c99c05", "type": "number", "answer": 34, "alias": []}
+{"id": "q_ce1712865b8c", "type": "number", "answer": 41465700, "alias": []}
+{"id": "q_5e23c80a5f47", "type": "number", "answer": 6480000, "alias": []}
+{"id": "q_4100ffcaa83c", "type": "number", "answer": 1204545000, "alias": []}
+{"id": "q_39edd2504089", "type": "number", "answer": 10553000, "alias": []}
+{"id": "q_aee7f655095b", "type": "number", "answer": 119908, "alias": []}
+{"id": "q_8f42ec85b989", "type": "number", "answer": 27671000, "alias": []}
+{"id": "q_0c0a18470dcf", "type": "number", "answer": 137, "alias": []}
+{"id": "q_b90743fdcce6", "type": "number", "answer": 35, "alias": []}

@@ -1,18 +1,18 @@
 # Ignored datasets and temporary files
-train/
+train/data/
+public_test/data/
 train_preprocessed/
 train_preprocessed_full/
-public_test/
 .cache/
 .pytest_cache/
 .venv/
 *.zip
-*.jsonl
+predictions*.jsonl
+submission*.jsonl
+test_*.jsonl
 *.jsonl.tmp
 *.pdf
 .DS_Store
 __pycache__/
 *.pyc
-predictions*.jsonl
-submission.jsonl
 *.ipynb

@@ -18,10 +18,11 @@ vllm = subprocess.Popen([
     "python3", "-m", "vllm.entrypoints.openai.api_server",
     "--model", "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ",
     "--port", "8000",
-    "--max-model-len", "8192",
+    "--max-model-len", "4096",
     "--gpu-memory-utilization", "0.90",
     "--enable-prefix-caching",
-    "--enforce-eager"
+    "--enforce-eager",
+    "--disable-log-requests",
 ])
 
 # 2. Chờ vLLM sẵn sàng (kèm kiểm tra tiến trình sống)
@@ -63,7 +64,9 @@ os.system(
     f"--model Qwen/Qwen2.5-Coder-14B-Instruct-AWQ "
     f"--backend openai "
     f"--api-base http://localhost:8000/v1 "
-    f"--concurrency 8 "
+    f"--concurrency 4 "
+    f"--consensus-mode dual "
+    f"--arbitration adaptive "
     f"--evaluate "
     f"--fresh"
 )

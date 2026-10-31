@@ -518,8 +518,10 @@ def check_consensus(pred1: Dict[str, Any], pred2: Dict[str, Any]) -> bool:
             f2 = float(a2)
             if math.isnan(f1) or math.isnan(f2) or math.isinf(f1) or math.isinf(f2):
                 return False
-            # Khớp tuyệt đối hoặc sai số dấu phẩy động cực nhỏ < 1e-4
-            return abs(f1 - f2) < 1e-4
+            # Khớp tuyệt đối hoặc sai số tương đối cực nhỏ cho số tài chính lớn
+            diff = abs(f1 - f2)
+            max_val = max(abs(f1), abs(f2))
+            return diff < 1e-4 or (max_val > 0 and diff / max_val < 1e-5)
         except (ValueError, TypeError):
             return False
 
@@ -545,7 +547,9 @@ def check_consensus(pred1: Dict[str, Any], pred2: Dict[str, Any]) -> bool:
             return False
         for x, y in zip(a1, a2):
             if isinstance(x, (int, float)) and isinstance(y, (int, float)):
-                if abs(float(x) - float(y)) >= 1e-4:
+                diff = abs(float(x) - float(y))
+                max_v = max(abs(float(x)), abs(float(y)))
+                if diff >= 1e-4 and (max_v == 0 or diff / max_v >= 1e-5):
                     return False
             else:
                 sx = unicodedata.normalize("NFC", str(x)).strip().lower()
@@ -569,10 +573,14 @@ def check_consensus(pred1: Dict[str, Any], pred2: Dict[str, Any]) -> bool:
                 return False
             for c1, c2 in zip(row1, row2):
                 if isinstance(c1, (int, float)) and isinstance(c2, (int, float)):
-                    if abs(float(c1) - float(c2)) >= 1e-4:
+                    diff = abs(float(c1) - float(c2))
+                    max_v = max(abs(float(c1)), abs(float(c2)))
+                    if diff >= 1e-4 and (max_v == 0 or diff / max_v >= 1e-5):
                         return False
                 else:
-                    if str(c1).strip().lower() != str(c2).strip().lower():
+                    s1 = unicodedata.normalize("NFC", str(c1)).strip().lower()
+                    s2 = unicodedata.normalize("NFC", str(c2)).strip().lower()
+                    if s1 != s2:
                         return False
         return True
 

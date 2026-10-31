@@ -137,6 +137,20 @@ def parse_args() -> argparse.Namespace:
         help="Đường dẫn tới file answers.jsonl chuẩn (dùng khi có --evaluate).",
     )
     parser.add_argument(
+        "--consensus-mode",
+        type=str,
+        default="dual",
+        choices=["dual", "single"],
+        help="Chế độ sinh code: 'dual' (2 prompt so khớp) hoặc 'single' (chỉ Prompt 1 SQL).",
+    )
+    parser.add_argument(
+        "--arbitration",
+        type=str,
+        default="adaptive",
+        choices=["adaptive", "strict"],
+        help="Chính sách trọng tài: 'adaptive' (giữ đáp án hợp lệ nếu bên kia lỗi kỹ thuật) hoặc 'strict' (bắt buộc cả 2 thành công).",
+    )
+    parser.add_argument(
         "--fresh",
         action="store_true",
         help="Chạy mới toàn bộ câu hỏi, không tái sử dụng cache từ file output cũ.",
@@ -226,6 +240,13 @@ def main() -> None:
             api_base=args.api_base,
         )
 
+    print(f"Kiểm tra kết nối tới LLM endpoint ({llm_client.backend} @ {llm_client.api_base})...")
+    if not llm_client.health_check(timeout=5.0):
+        print(f"⚠️ CẢNH BÁO: Chưa kết nối được tới LLM endpoint tại {llm_client.api_base}!")
+        print(f"   Nếu đang dùng vLLM/Ollama, hãy đảm bảo server đã chạy xong bước khởi động.")
+    else:
+        print(f"✅ Kết nối LLM endpoint thành công! Sẵn sàng phục vụ.")
+
     agent = DataMateAgent(
         data_root=args.data_root,
         calendar_path=args.calendar,
@@ -234,6 +255,8 @@ def main() -> None:
         sandbox_timeout=args.timeout,
         max_retries=args.max_retries,
         verbose=args.verbose,
+        consensus_mode=args.consensus_mode,
+        arbitration_strategy=args.arbitration,
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -360,7 +383,12 @@ def main() -> None:
                         if len(ans_preview) > 35:
                             ans_preview = ans_preview[:32] + "..."
 
-                        status_tag = "ĐỒNG THUẬN" if details.get("is_consensus") else "ABSTAIN"
+                        if details.get("is_consensus"):
+                            status_tag = "ĐỒNG THUẬN"
+                        elif pred.get("type") != "abstain":
+                            status_tag = f"FALLBACK ({details.get('decision_reason', 'adaptive')})"
+                        else:
+                            status_tag = "ABSTAIN"
                         log_line = (
                             f"[{completed_count}/{len(questions)}] ({completed_count/len(questions)*100:.1f}%) [{status_tag}] "
                             f"{qid} ({q_obj['business_id']}) -> {pred.get('type')}: {ans_preview} | Tốc độ: {avg_speed:.2f}s/câu | ETA: {rem_mins:.1f}m"

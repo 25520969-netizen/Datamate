@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
 from src.date_resolver import DateResolver
 from src.ingest import BusinessDataStore
@@ -97,7 +99,7 @@ class QwenCoderClient:
         api_base: Optional[str] = None,
         api_key: Optional[str] = None,
         temperature: float = 0.0,
-        max_tokens: int = 640,
+        max_tokens: int = 768,
         request_timeout: float = 90.0,
         custom_generator: Optional[Callable[[List[Dict[str, str]]], str]] = None,
     ) -> None:
@@ -120,8 +122,50 @@ class QwenCoderClient:
         self.request_timeout = request_timeout
         self.custom_generator = custom_generator
 
+        self._session = requests.Session()
+        adapter = HTTPAdapter(
+            pool_connections=32,
+            pool_maxsize=32,
+            max_retries=Retry(
+                total=3,
+                backoff_factor=0.5,
+                status_forcelist=[429, 500, 502, 503, 504],
+                raise_on_status=False,
+            ),
+        )
+        self._session.mount("http://", adapter)
+        self._session.mount("https://", adapter)
+
         self._hf_tokenizer: Any = None
         self._hf_model: Any = None
+
+    def _get_openai_url(self) -> str:
+        base = self.api_base.rstrip("/")
+        if base.endswith("/chat/completions"):
+            return base
+        if base.endswith("/v1"):
+            return f"{base}/chat/completions"
+        return f"{base}/v1/chat/completions"
+
+    def health_check(self, timeout: float = 5.0) -> bool:
+        """Kiểm tra kết nối tới LLM backend trước khi chạy toàn bộ pipeline."""
+        if self.custom_generator is not None:
+            return True
+        if self.backend == "openai":
+            try:
+                models_url = self._get_openai_url().replace("/chat/completions", "/models")
+                headers = {"Authorization": f"Bearer {self.api_key}"}
+                r = self._session.get(models_url, headers=headers, timeout=timeout)
+                return r.status_code == 200
+            except Exception:
+                return False
+        if self.backend == "ollama":
+            try:
+                r = self._session.get(f"{self.api_base}/api/tags", timeout=timeout)
+                return r.status_code == 200
+            except Exception:
+                return False
+        return True
 
     def _ensure_hf_loaded(self) -> None:
         if self._hf_model is not None and self._hf_tokenizer is not None:
@@ -144,22 +188,47 @@ class QwenCoderClient:
             return self.custom_generator(messages)
 
         if self.backend == "openai":
-            url = f"{self.api_base}/chat/completions"
+            url = self._get_openai_url()
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self.api_key}",
             }
-            payload = {
+            payload: Dict[str, Any] = {
                 "model": self.model_name,
                 "messages": messages,
-                "temperature": 0.0,
+                "temperature": self.temperature,
                 "max_tokens": self.max_tokens,
-                "seed": seed,
             }
-            resp = requests.post(url, json=payload, headers=headers, timeout=self.request_timeout)
-            resp.raise_for_status()
-            data = resp.json()
-            return data["choices"][0]["message"]["content"]
+            # Chỉ truyền seed khi sampling (temperature > 0) để tương thích vLLM OpenAI API
+            if seed is not None and self.temperature > 0:
+                payload["seed"] = seed
+
+            last_exc: Optional[Exception] = None
+            for call_attempt in range(3):
+                try:
+                    resp = self._session.post(url, json=payload, headers=headers, timeout=self.request_timeout)
+                    if resp.status_code == 404:
+                        # Tự động đồng bộ model name từ /v1/models nếu tên model không khớp
+                        try:
+                            models_url = url.replace("/chat/completions", "/models")
+                            m_resp = self._session.get(models_url, headers=headers, timeout=5.0)
+                            if m_resp.ok:
+                                m_data = m_resp.json()
+                                available = [m["id"] for m in m_data.get("data", []) if "id" in m]
+                                if available and self.model_name not in available:
+                                    self.model_name = available[0]
+                                    payload["model"] = self.model_name
+                                    resp = self._session.post(url, json=payload, headers=headers, timeout=self.request_timeout)
+                        except Exception:
+                            pass
+                    resp.raise_for_status()
+                    data = resp.json()
+                    return data["choices"][0]["message"]["content"]
+                except Exception as exc:
+                    last_exc = exc
+                    if call_attempt < 2:
+                        time.sleep(1.0 * (call_attempt + 1))
+            raise RuntimeError(f"OpenAI API call to {url} failed after 3 attempts: {last_exc}")
 
         if self.backend == "ollama":
             url = f"{self.api_base}/api/chat"
@@ -168,12 +237,13 @@ class QwenCoderClient:
                 "messages": messages,
                 "stream": False,
                 "options": {
-                    "temperature": 0.0,
-                    "seed": seed,
+                    "temperature": self.temperature,
                     "num_predict": self.max_tokens,
                 },
             }
-            resp = requests.post(url, json=payload, timeout=self.request_timeout)
+            if seed is not None and self.temperature > 0:
+                payload["options"]["seed"] = seed
+            resp = self._session.post(url, json=payload, timeout=self.request_timeout)
             resp.raise_for_status()
             data = resp.json()
             return data["message"]["content"]
@@ -224,6 +294,8 @@ class DataMateAgent:
         sandbox_timeout: float = 10.0,
         max_retries: int = 2,
         verbose: bool = False,
+        consensus_mode: str = "dual",
+        arbitration_strategy: str = "adaptive",
     ) -> None:
         self.store = BusinessDataStore(data_root=data_root, cache_root=cache_root)
         self.date_resolver = DateResolver(calendar_path=calendar_path)
@@ -238,6 +310,8 @@ class DataMateAgent:
         self.llm_client = llm_client
         self.max_retries = max_retries
         self.verbose = verbose
+        self.consensus_mode = consensus_mode.lower().strip()
+        self.arbitration_strategy = arbitration_strategy.lower().strip()
 
     def build_user_prompt(
         self,
@@ -294,6 +368,7 @@ class DataMateAgent:
         ]
         last_code = ""
         last_raw = None
+        last_error = ""
         total_attempts = self.max_retries + 1
 
         for attempt in range(total_attempts):
@@ -301,9 +376,12 @@ class DataMateAgent:
                 llm_reply = self.llm_client.generate(messages, seed=seed)
                 last_code = llm_reply
             except Exception as llm_exc:
-                if self.verbose:
-                    print(f"    ⚠️ [LLM Error] {qid} ({business_id}, attempt {attempt+1}): {llm_exc}", flush=True)
-                return {"id": qid, "type": "abstain"}, last_code, None
+                last_error = f"LLM Generation Error: {llm_exc}"
+                print(f"    ⚠️ [LLM Error] {qid} ({business_id}, attempt {attempt+1}/{total_attempts}): {llm_exc}", flush=True)
+                if attempt < self.max_retries:
+                    time.sleep(1.0 * (attempt + 1))
+                    continue
+                return {"id": qid, "type": "abstain", "error": last_error}, last_code, None
 
             exec_outcome = self.sandbox.execute(
                 code=llm_reply,
@@ -323,6 +401,7 @@ class DataMateAgent:
                 return final_pred, last_code, last_raw
 
             err_msg = exec_outcome.get("error") or "Biến `result` có giá trị `None` sau khi chạy code."
+            last_error = f"Sandbox Error: {err_msg}"
             if attempt < self.max_retries:
                 messages = [
                     {"role": "system", "content": system_prompt},
@@ -339,17 +418,19 @@ class DataMateAgent:
                     },
                 ]
 
-        return {"id": qid, "type": "abstain"}, last_code, last_raw
+        return {"id": qid, "type": "abstain", "error": last_error}, last_code, last_raw
 
     def answer_question_dual(
         self, question_obj: Dict[str, Any]
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
-        Giải quyết câu hỏi bằng kiến trúc Dual-Prompt Consensus Gate:
+        Giải quyết câu hỏi bằng kiến trúc Dual-Prompt Consensus Gate & Tiered Arbitration:
           - Prompt 1: SQL-Centric trên DuckDB (Seed 42).
           - Prompt 2: Defensive Step-by-Step trên Pandas (Seed 100).
-          - Chỉ nhận đáp án khi cả hai lời giải đồng thuận giá trị chuẩn.
-        Trả về: (final_pred, details_dict) để xuất đồng thời 2 file JSONL.
+          - Phân cấp trọng tài tin cậy:
+              * Cả hai đều ra đáp án: Bắt buộc đồng thuận (check_consensus) để tránh sai (-1).
+              * Một bên thành công vượt qua guard, một bên lỗi kỹ thuật: Chấp nhận đáp án hợp lệ (Adaptive).
+              * Cả hai lỗi: Quyết định Abstain an toàn (0 điểm).
         """
         qid = question_obj["id"]
         business_id = question_obj["business_id"]
@@ -389,6 +470,7 @@ class DataMateAgent:
                     "prompt2_raw": unans_resp,
                     "prompt2_pred": unans_resp,
                     "is_consensus": True,
+                    "decision_reason": "deterministic_unanswerable",
                     "final_decision": "unanswerable",
                     "final_answer": None,
                 }
@@ -402,6 +484,7 @@ class DataMateAgent:
                 "expected_type": "unknown",
                 "error": str(e),
                 "is_consensus": False,
+                "decision_reason": "exception_before_prompt",
                 "final_decision": "abstain",
                 "final_answer": None,
             }
@@ -417,7 +500,7 @@ class DataMateAgent:
             few_shot_prompt=few_shot_prompt,
         )
 
-        # 1. Chạy Prompt 1: SQL-Centric
+        # 1. Chạy Prompt 1: SQL-Centric (DuckDB Relational)
         pred1, code1, raw1 = self._solve_single_prompt(
             system_prompt=SYSTEM_PROMPT_SQL,
             user_prompt=user_prompt,
@@ -430,7 +513,34 @@ class DataMateAgent:
             seed=42,
         )
 
-        # 2. Chạy Prompt 2: Defensive Step-by-Step
+        p1_valid = (
+            isinstance(pred1, dict)
+            and pred1.get("type") in ("number", "percent", "date", "string", "list", "table", "boolean", "unanswerable")
+            and pred1.get("type") != "abstain"
+        )
+
+        # Nếu cấu hình single prompt mode (chỉ Prompt 1)
+        if self.consensus_mode == "single":
+            final_pred = pred1 if p1_valid else {"id": qid, "type": "abstain"}
+            details = {
+                "id": qid,
+                "business_id": business_id,
+                "question": question,
+                "expected_type": expected_type,
+                "prompt1_code": code1,
+                "prompt1_raw": raw1,
+                "prompt1_pred": pred1,
+                "prompt2_code": "",
+                "prompt2_raw": None,
+                "prompt2_pred": None,
+                "is_consensus": p1_valid,
+                "decision_reason": "single_prompt_mode",
+                "final_decision": final_pred.get("type"),
+                "final_answer": final_pred.get("answer"),
+            }
+            return final_pred, details
+
+        # 2. Chạy Prompt 2: Defensive Step-by-Step (Pandas Procedural)
         pred2, code2, raw2 = self._solve_single_prompt(
             system_prompt=SYSTEM_PROMPT_DEFENSIVE,
             user_prompt=user_prompt,
@@ -443,12 +553,47 @@ class DataMateAgent:
             seed=100,
         )
 
-        # 3. So khớp đồng thuận (Consensus Gate)
-        is_consensus = check_consensus(pred1, pred2)
-        if is_consensus:
-            final_pred = pred1
+        p2_valid = (
+            isinstance(pred2, dict)
+            and pred2.get("type") in ("number", "percent", "date", "string", "list", "table", "boolean", "unanswerable")
+            and pred2.get("type") != "abstain"
+        )
+
+        # 3. Phân cấp đồng thuận & Trọng tài tin cậy (Tiered Consensus Arbitration)
+        is_consensus = False
+        decision_reason = ""
+        final_pred = {"id": qid, "type": "abstain"}
+
+        if p1_valid and p2_valid:
+            # Cả hai bên đều ra đáp án -> Bắt buộc kiểm tra đồng thuận
+            if check_consensus(pred1, pred2):
+                is_consensus = True
+                final_pred = pred1
+                decision_reason = "consensus_match"
+            else:
+                is_consensus = False
+                final_pred = {"id": qid, "type": "abstain"}
+                decision_reason = "consensus_disagreement_abstain"
+        elif p1_valid and not p2_valid:
+            if self.arbitration_strategy == "adaptive":
+                # Prompt 1 (SQL) vượt qua toàn bộ guard an toàn, Prompt 2 lỗi kỹ thuật -> Giữ Prompt 1
+                is_consensus = False
+                final_pred = pred1
+                decision_reason = "p1_valid_p2_failed_fallback"
+            else:
+                final_pred = {"id": qid, "type": "abstain"}
+                decision_reason = "strict_requires_both"
+        elif p2_valid and not p1_valid:
+            if self.arbitration_strategy == "adaptive":
+                is_consensus = False
+                final_pred = pred2
+                decision_reason = "p2_valid_p1_failed_fallback"
+            else:
+                final_pred = {"id": qid, "type": "abstain"}
+                decision_reason = "strict_requires_both"
         else:
             final_pred = {"id": qid, "type": "abstain"}
+            decision_reason = "both_failed"
 
         details = {
             "id": qid,
@@ -462,6 +607,7 @@ class DataMateAgent:
             "prompt2_raw": raw2,
             "prompt2_pred": pred2,
             "is_consensus": is_consensus,
+            "decision_reason": decision_reason,
             "final_decision": final_pred.get("type"),
             "final_answer": final_pred.get("answer"),
         }

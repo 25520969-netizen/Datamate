@@ -22,7 +22,7 @@ vllm = subprocess.Popen([
     "--gpu-memory-utilization", "0.90",
     "--enable-prefix-caching",
     "--enforce-eager",
-    "--disable-log-requests",
+    "--trust-remote-code",
 ])
 
 # 2. Chờ vLLM sẵn sàng (kèm kiểm tra tiến trình sống)

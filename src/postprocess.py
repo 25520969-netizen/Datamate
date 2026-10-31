@@ -24,6 +24,15 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional
 
 
+def strip_accents(text: Any) -> str:
+    """Chuẩn hóa chuỗi tiếng Việt: NFC, đổi đ/Đ thành d, bỏ dấu tổ hợp, chữ thường."""
+    if text is None:
+        return ""
+    s = unicodedata.normalize("NFC", str(text)).strip()
+    s = s.replace("đ", "d").replace("Đ", "d")
+    return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("ascii").lower()
+
+
 MONEY_KEYWORDS = (
     "bao nhiêu tiền",
     "bao nhiu tien",
@@ -214,6 +223,7 @@ def postprocess_and_guard(
     # 1. Xử lý NUMBER
     if ans_type == "number":
         q_low = question.lower()
+        q_clean = strip_accents(question)
         if isinstance(ans_val, bool) or not isinstance(ans_val, (int, float)):
             return abstain_resp
         if math.isnan(ans_val) or math.isinf(ans_val):
@@ -250,10 +260,17 @@ def postprocess_and_guard(
         if is_single_day_q and final_num > 500000000:
             return abstain_resp
 
-        # Sanity Guard 3: Nếu câu hỏi về doanh thu / số đơn phát sinh trong ngày/tuần/tháng đang hoạt động mà ra 0
-        # thì 99% là lỗi lọc ngày rỗng -> kích hoạt abstain (0 điểm) để tránh nhận điểm phạt (-1 điểm)
+        # Sanity Guard 3: Nếu câu hỏi về doanh thu / số đơn phát sinh trong ngày/tuần/tháng đang hoạt động,
+        # hoặc số lượng sản phẩm / khách nợ mà ra 0 thì thường do không khớp chuỗi hoặc lọc ngày rỗng -> abstain an toàn
         if final_num == 0:
-            if any(k in q_low for k in ["hôm nay", "hnay", "hom ni", "bữa nay", "bua nay", "riêng hôm nay", "doanh thu hôm", "dthu hôm", "được mấy đơn", "mấy đh"]):
+            if any(k in q_clean for k in [
+                "hom nay", "hnay", "hom ni", "bua nay", "rieng hom nay", "doanh thu hom", "dthu hom", "duoc may don", "may dh",
+                "may noi", "may dia", "may ly", "may lon", "may kg", "may chai", "may hop",
+                "bao nhieu noi", "bao nhieu dia", "bao nhieu ly", "bao nhieu lon", "bao nhieu kg", "bao nhieu chai", "bao nhieu hop",
+                "bao nhiu noi", "bao nhiu dia", "bao nhiu ly", "bao nhiu lon", "bao nhiu kg", "bao nhiu chai", "bao nhiu hop",
+                "bao nhieu tien", "bao nhiu tien", "bnhiu tien", "bn tien",
+                "so khach con cong no", "khach con cong no"
+            ]):
                 return abstain_resp
 
         return {"id": question_id, "type": "number", "answer": final_num}
@@ -261,6 +278,7 @@ def postprocess_and_guard(
     # 2. Xử lý PERCENT
     if ans_type == "percent":
         q_low = question.lower()
+        q_clean = strip_accents(question)
         if isinstance(ans_val, str):
             s_clean = ans_val.strip().rstrip("%").strip().replace(",", ".")
             try:
@@ -272,8 +290,8 @@ def postprocess_and_guard(
         if math.isnan(ans_val) or math.isinf(ans_val):
             return abstain_resp
 
-        # Sanity check: tỉ lệ phần trăm không thể < -100% hoặc vượt quá 300% (tăng trưởng doanh thu bán lẻ tháng)
-        if float(ans_val) < -100.0 or abs(float(ans_val)) > 300.0:
+        # Sanity check: tỉ lệ phần trăm không thể < -100% hoặc vượt quá 5000% (tăng trưởng doanh thu từ cơ sở nhỏ)
+        if float(ans_val) < -100.0 or abs(float(ans_val)) > 5000.0:
             return abstain_resp
 
         # Tự động quy đổi tỷ số thập phân nếu model trả về dạng tỷ lệ 0 < val < 1.0 (vd: 0.403 cho 40.3%, 0.3517 cho 35.17%)
@@ -283,13 +301,18 @@ def postprocess_and_guard(
         final_pct = round_half_up_2dec(float(ans_val))
 
         # Sanity Guard 4: Tỉ trọng / Tỉ lệ đóng góp không thể vượt quá 100% hoặc nhỏ hơn 0%
-        if any(k in q_low for k in ["chiếm", "chiem", "tỉ trọng", "tỷ trọng", "ti trong", "đóng góp", "dong gop", "tỉ lệ đơn hủy", "tỷ lệ đơn hủy", "tỉ lệ hủy", "tỷ lệ huỷ"]):
+        if any(k in q_clean for k in ["chiem", "ti trong", "ty trong", "dong gop", "ti le don huy", "ti le huy"]):
             if final_pct > 100.0 or final_pct < 0.0:
                 return abstain_resp
 
-        # Sanity Guard 5: Tăng/giảm hoặc thay đổi % ra đúng 0.0% thường do lọc ngày bị rỗng
+        # Sanity Guard 5: Tăng/giảm, tỉ lệ hủy, hoặc tỉ trọng % ra đúng 0.0% thường do lọc sót đơn hủy hoặc rỗng
         if final_pct == 0.0:
-            if any(k in q_low for k in ["thay đổi", "thay doi", "tăng hay giảm", "tang hay giam", "tăng giảm", "tang giam"]):
+            if any(k in q_clean for k in [
+                "thay doi", "tang hay giam", "tang giam",
+                "ti le don huy", "ti le huy", "ti le huy don", "ti le don bi huy",
+                "chiem bao nhieu %", "chiem bn %", "dong gop bn %", "dong gop bao nhieu %",
+                "chiem bnhiu %", "chiem bao nhiu %"
+            ]):
                 return abstain_resp
 
         return {"id": question_id, "type": "percent", "answer": final_pct}
@@ -527,6 +550,11 @@ def check_consensus(pred1: Dict[str, Any], pred2: Dict[str, Any]) -> bool:
 
     # 2. So khớp DATE
     if t1 == "date":
+        from src.ingest import normalize_date_value_iso
+        d1_norm = normalize_date_value_iso(str(a1).strip())
+        d2_norm = normalize_date_value_iso(str(a2).strip())
+        if d1_norm and d2_norm:
+            return d1_norm == d2_norm
         return str(a1).strip() == str(a2).strip()
 
     # 3. So khớp BOOLEAN
@@ -537,7 +565,16 @@ def check_consensus(pred1: Dict[str, Any], pred2: Dict[str, Any]) -> bool:
     if t1 == "string":
         s1 = unicodedata.normalize("NFC", str(a1)).strip().lower()
         s2 = unicodedata.normalize("NFC", str(a2)).strip().lower()
-        return s1 == s2
+        if s1 == s2:
+            return True
+        c1 = re.sub(r"\s*\([^)]+\)$", "", strip_trailing_measurement_in_parens(s1)).strip()
+        c2 = re.sub(r"\s*\([^)]+\)$", "", strip_trailing_measurement_in_parens(s2)).strip()
+        if c1 == c2:
+            return True
+        # Nếu một chuỗi là tiền tố/chuỗi con của chuỗi kia với độ tương đồng >= 60%
+        if (c1 in c2 or c2 in c1) and min(len(c1), len(c2)) >= 4 and (min(len(c1), len(c2)) / max(len(c1), len(c2)) >= 0.6):
+            return True
+        return False
 
     # 5. So khớp LIST
     if t1 == "list":
@@ -552,9 +589,9 @@ def check_consensus(pred1: Dict[str, Any], pred2: Dict[str, Any]) -> bool:
                 if diff >= 1e-4 and (max_v == 0 or diff / max_v >= 1e-5):
                     return False
             else:
-                sx = unicodedata.normalize("NFC", str(x)).strip().lower()
-                sy = unicodedata.normalize("NFC", str(y)).strip().lower()
-                if sx != sy:
+                sx = re.sub(r"\s*\([^)]+\)$", "", strip_trailing_measurement_in_parens(unicodedata.normalize("NFC", str(x)).strip().lower())).strip()
+                sy = re.sub(r"\s*\([^)]+\)$", "", strip_trailing_measurement_in_parens(unicodedata.normalize("NFC", str(y)).strip().lower())).strip()
+                if sx != sy and not ((sx in sy or sy in sx) and min(len(sx), len(sy)) >= 4 and min(len(sx), len(sy)) / max(len(sx), len(sy)) >= 0.6):
                     return False
         return True
 

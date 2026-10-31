@@ -11,13 +11,109 @@ với giới hạn thời gian (timeout mặc định 10 giây), cung cấp sẵ
 Nếu có lỗi cú pháp hoặc Runtime Exception, trích xuất Traceback ngắn gọn để LLM tự sửa lỗi.
 """
 
+import concurrent.futures
 import json
+import math
 import re
 import subprocess
 import sys
 import tempfile
+import traceback
+import unicodedata
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+import duckdb
+import numpy as np
+import pandas as pd
+
+
+def strip_accents(text: Any) -> str:
+    if text is None:
+        return ""
+    s = unicodedata.normalize("NFC", str(text)).strip()
+    s = s.replace("đ", "d").replace("Đ", "d")
+    return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("ascii").lower()
+
+
+def _serialize_default(obj: Any) -> Any:
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    if isinstance(obj, (pd.Timestamp, datetime, date)):
+        return obj.isoformat()[:10]
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if pd.isna(obj):
+        return None
+    return str(obj)
+
+
+def _build_col_fuzzy_rules(tables: Dict[str, pd.DataFrame]) -> List[Tuple[Any, str]]:
+    special_cols = sorted(
+        {str(c) for df in tables.values() for c in df.columns if re.search(r"[^\w]", str(c))},
+        key=len,
+        reverse=True,
+    )
+    accent_map = {
+        "a": "[aàáảãạăằắẳẵặâầấẩẫậ]", "e": "[eèéẻẽẹêềếểễệ]", "i": "[iìíỉĩị]",
+        "o": "[oòóỏõọôồốổỗộơờớởỡợ]", "u": "[uùúủũụưừứửữự]", "y": "[yỳýỷỹỵ]",
+        "d": "[dđ]"
+    }
+    col_fuzzy_rules = []
+    for col in special_cols:
+        clean_toks = [t for t in re.split(r"[\s_()/,.-]+", col) if t]
+        if not clean_toks:
+            continue
+        pat_toks = []
+        for tok in clean_toks:
+            chars = []
+            for ch in tok.lower():
+                base = "d" if ch in "dđ" else ("a" if ch in "aàáảãạăằắẳẵặâầấẩẫậ" else ("e" if ch in "eèéẻẽẹêềếểễệ" else ("i" if ch in "iìíỉĩị" else ("o" if ch in "oòóỏõọôồốổỗộơờớởỡợ" else ("u" if ch in "uùúủũụưừứửữự" else ("y" if ch in "yỳýỷỹỵ" else ch))))))
+                chars.append(accent_map.get(base, re.escape(ch)))
+            pat_toks.append("".join(chars))
+        sep = r"[\s_()/,.-]*"
+        trail = r"\)?" if col.strip().endswith(")") else ""
+        lead = r"\(?" if col.strip().startswith("(") else ""
+        pat_regex = re.compile(r"(?<![\w\"`])" + lead + sep.join(pat_toks) + trail + r"(?![\w\"`])", re.IGNORECASE)
+        col_fuzzy_rules.append((pat_regex, f'"{col}"'))
+    return col_fuzzy_rules
+
+
+class SafeDuckDBWrapper:
+    """Bọc kết nối DuckDB để tự động chuyển MySQL backticks thành double-quotes và so khớp mờ tên cột."""
+
+    def __init__(self, inner_con: Any, col_fuzzy_rules: Optional[List[Tuple[Any, str]]] = None) -> None:
+        self._inner = inner_con
+        self._rules = col_fuzzy_rules or []
+
+    def _fix_sql(self, sql: str) -> str:
+        fixed = re.sub(r"`([^`]+)`", r'"\1"', str(sql))
+        if not self._rules:
+            return fixed
+        parts = re.split(r"('[^']*'|\"[^\"]*\")", fixed)
+        for idx in range(0, len(parts), 2):
+            chunk = parts[idx]
+            for pat_re, repl in self._rules:
+                chunk = pat_re.sub(repl, chunk)
+            parts[idx] = chunk
+        return "".join(parts)
+
+    def execute(self, sql: str, *args, **kwargs):
+        return self._inner.execute(self._fix_sql(sql), *args, **kwargs)
+
+    def sql(self, query: str, *args, **kwargs):
+        return self._inner.sql(self._fix_sql(query), *args, **kwargs)
+
+    def query(self, query: str, *args, **kwargs):
+        return self._inner.query(self._fix_sql(query), *args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
 
 
 class _FuzzyDateContext(dict):
@@ -56,6 +152,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.ingest import BusinessDataStore
+
+def strip_accents(text):
+    if text is None:
+        return ""
+    s = unicodedata.normalize("NFC", str(text)).strip()
+    s = s.replace("đ", "d").replace("Đ", "d")
+    return unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("ascii").lower()
 
 def _serialize_default(obj):
     if isinstance(obj, (np.integer,)):
@@ -179,6 +282,7 @@ def main():
         "datetime": datetime,
         "timedelta": timedelta,
         "unicodedata": unicodedata,
+        "strip_accents": strip_accents,
         "con": con,
         "tables": tables,
         "as_of_date": as_of_date,
@@ -288,8 +392,30 @@ def extract_python_code(llm_response: str) -> str:
 from src.ingest import BusinessDataStore
 
 
+class _DuckDBModuleProxy:
+    """Proxy cho module duckdb trong sandbox in-process, định tuyến an toàn tới kết nối đã nạp đủ bảng."""
+
+    def __init__(self, safe_con: Any) -> None:
+        self._con = safe_con
+
+    def connect(self, *args, **kwargs):
+        return self._con
+
+    def sql(self, *args, **kwargs):
+        return self._con.sql(*args, **kwargs)
+
+    def execute(self, *args, **kwargs):
+        return self._con.execute(*args, **kwargs)
+
+    def query(self, *args, **kwargs):
+        return self._con.query(*args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(duckdb, name)
+
+
 class PythonSandbox:
-    """Thực thi mã Python cô lập trong subprocess với timeout nghiêm ngặt."""
+    """Thực thi mã Python an toàn và siêu tốc (in-process mặc định <0.05s, tự động fallback subprocess nếu cần)."""
 
     def __init__(
         self,
@@ -297,42 +423,122 @@ class PythonSandbox:
         cache_root: Optional[Path] = None,
         timeout_seconds: float = 10.0,
         python_executable: Optional[str] = None,
+        in_process: bool = True,
     ) -> None:
         self.project_root = Path(__file__).resolve().parent.parent
         self.data_root = Path(data_root)
         self.cache_root = cache_root or (self.project_root / ".cache" / "ingested")
         self.timeout_seconds = timeout_seconds
         self.python_executable = python_executable or sys.executable
+        self.in_process = in_process
         self._warm_store = BusinessDataStore(data_root=self.data_root, cache_root=self.cache_root)
 
-    def execute(
+    def _execute_in_process(
         self,
-        code: str,
+        cleaned_code: str,
         business_id: str,
         as_of_date: str,
         date_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """
-        Chạy đoạn code Python trong subprocess cô lập.
-        Trả về dict: {"ok": bool, "result": Any, "error": Optional[str]}
-        """
-        cleaned_code = extract_python_code(code)
-        if not cleaned_code:
-            return {"ok": False, "result": None, "error": "Empty Python code generated."}
+        raw_con, tables = self._warm_store.create_duckdb_connection(business_id)
+        rules = _build_col_fuzzy_rules(tables)
+        safe_con = SafeDuckDBWrapper(raw_con, rules)
+        duckdb_proxy = _DuckDBModuleProxy(safe_con)
 
-        # Kiểm tra cú pháp nhanh trước khi tạo subprocess
-        try:
-            compile(cleaned_code, "<llm_generated_code>", "exec")
-        except SyntaxError as syn_err:
-            return {
-                "ok": False,
-                "result": None,
-                "error": f"SyntaxError at line {syn_err.lineno}: {syn_err.msg}\n{syn_err.text or ''}",
-            }
+        fuzzy_ctx = _FuzzyDateContext(date_context or {})
+        env = {
+            "__builtins__": __builtins__,
+            "pd": pd,
+            "np": np,
+            "duckdb": duckdb_proxy,
+            "re": re,
+            "math": math,
+            "date": date,
+            "datetime": datetime,
+            "timedelta": timedelta,
+            "unicodedata": unicodedata,
+            "strip_accents": strip_accents,
+            "con": safe_con,
+            "tables": tables,
+            "as_of_date": as_of_date,
+            "date_context": fuzzy_ctx,
+            "result": None,
+            "answer": None,
+        }
 
-        # Đảm bảo dữ liệu của business_id đã được chuẩn hóa vào Parquet cache trước khi bấm giờ timeout
+        def _target():
+            compiled = compile(cleaned_code, "<llm_generated_code>", "exec")
+            exec(compiled, env, env)
+            raw_res = env.get("result")
+            if raw_res is None and env.get("answer") is not None:
+                raw_res = env.get("answer")
+            if raw_res is None and callable(env.get("solve")):
+                raw_res = env["solve"](tables, safe_con, as_of_date)
+
+            if hasattr(raw_res, "df") and callable(getattr(raw_res, "df")):
+                try:
+                    raw_res = raw_res.df()
+                except Exception:
+                    pass
+
+            if isinstance(raw_res, pd.DataFrame):
+                raw_res = {
+                    "columns": [str(c) for c in raw_res.columns],
+                    "rows": raw_res.values.tolist(),
+                }
+            elif isinstance(raw_res, pd.Series):
+                raw_res = raw_res.tolist()
+
+            # Chuẩn hóa JSON để tương thích 100% với các kiểu dữ liệu của subprocess
+            raw_res = json.loads(json.dumps(raw_res, default=_serialize_default, ensure_ascii=False))
+            return {"ok": True, "result": raw_res, "error": None}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            fut = executor.submit(_target)
+            try:
+                return fut.result(timeout=self.timeout_seconds)
+            except concurrent.futures.TimeoutError:
+                return {
+                    "ok": False,
+                    "result": None,
+                    "error": f"TimeoutError: Code execution exceeded {self.timeout_seconds}s limit.",
+                }
+            except Exception as exc:
+                tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+                user_frames = [
+                    line for line in tb_lines[:-1]
+                    if "<llm_generated_code>" in line
+                ]
+                tb_str = "".join(user_frames + [tb_lines[-1]]).strip()
+                code_lines = cleaned_code.splitlines()
+                line_nums = [int(x) for x in re.findall(r'File "<llm_generated_code>", line (\d+)', tb_str)]
+                offending_info = ""
+                if line_nums:
+                    ln_no = line_nums[-1]
+                    if 1 <= ln_no <= len(code_lines):
+                        offending_info = f"\nDòng gây lỗi (line {ln_no}): {code_lines[ln_no - 1].strip()}"
+                ordered_tbls = sorted(
+                    [(t, d) for t, d in tables.items() if not re.match(r"^.+?_(\d+|202[4-9])$", t)],
+                    key=lambda item: (0 if item[0] in cleaned_code else 1, item[0]),
+                )
+                schema_hint = "; ".join(
+                    f"{t}: { [c for c in d.columns if c != '_sheet_name'] }"
+                    for t, d in ordered_tbls
+                )
+                return {
+                    "ok": False,
+                    "result": None,
+                    "error": f"{tb_str}{offending_info}\nCác bảng và cột hợp lệ trong `tables` (ưu tiên bảng đang dùng): {schema_hint}",
+                }
+
+    def _execute_subprocess(
+        self,
+        cleaned_code: str,
+        business_id: str,
+        as_of_date: str,
+        date_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         self._warm_store.load_tables(business_id, use_cache=True)
-
         with tempfile.TemporaryDirectory(prefix="datamate_sb_") as tmp_dir:
             tmp_path = Path(tmp_dir)
             runner_path = tmp_path / "sandbox_runner.py"
@@ -378,3 +584,47 @@ class PythonSandbox:
 
             stderr_msg = (proc.stderr or proc.stdout or "Unknown subprocess failure").strip()
             return {"ok": False, "result": None, "error": stderr_msg[-1000:]}
+
+    def execute(
+        self,
+        code: str,
+        business_id: str,
+        as_of_date: str,
+        date_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Chạy đoạn code Python an toàn (ưu tiên in-process <0.05s, tự động fallback subprocess nếu cần).
+        Trả về dict: {"ok": bool, "result": Any, "error": Optional[str]}
+        """
+        cleaned_code = extract_python_code(code)
+        if not cleaned_code:
+            return {"ok": False, "result": None, "error": "Empty Python code generated."}
+
+        # Kiểm tra cú pháp nhanh
+        try:
+            compile(cleaned_code, "<llm_generated_code>", "exec")
+        except SyntaxError as syn_err:
+            return {
+                "ok": False,
+                "result": None,
+                "error": f"SyntaxError at line {syn_err.lineno}: {syn_err.msg}\n{syn_err.text or ''}",
+            }
+
+        if self.in_process:
+            try:
+                return self._execute_in_process(
+                    cleaned_code=cleaned_code,
+                    business_id=business_id,
+                    as_of_date=as_of_date,
+                    date_context=date_context,
+                )
+            except Exception:
+                # Fallback an toàn sang subprocess nếu có lỗi môi trường cấp thấp
+                pass
+
+        return self._execute_subprocess(
+            cleaned_code=cleaned_code,
+            business_id=business_id,
+            as_of_date=as_of_date,
+            date_context=date_context,
+        )

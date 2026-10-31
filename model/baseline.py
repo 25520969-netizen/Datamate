@@ -12,6 +12,7 @@ Kết hợp:
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -42,9 +43,16 @@ QUY TẮC CỐT LÕI (DUCKDB SQL):
    - Tất cả tên bảng và tên cột tiếng Việt có dấu, khoảng trắng BẮT BUỘC bọc trong ngoặc kép: `"Thành tiền"`, `"Mã đơn hàng"`, `"Ngày"`, `"Trạng thái"`.
    - Lọc ngày: `WHERE CAST("Ngày" AS DATE) BETWEEN DATE 'start' AND DATE 'end'` (hoặc `CAST("Ngày" AS VARCHAR)`).
    - Lọc đơn hợp lệ (bỏ đơn hủy, đơn trả): `WHERE "status_norm" = 'Hoàn thành'` (hoặc `"Trạng thái" NOT ILIKE '%hủy%' AND "Trạng thái" NOT ILIKE '%trả%'`).
-   - Xếp hạng / Bán chạy: `ORDER BY SUM(COALESCE("qty_base", "Số lượng")) DESC LIMIT N`. Tuyệt đối không xếp hạng bán chạy theo doanh thu!
+   - Doanh thu (revenue): Luôn là `SUM(COALESCE("revenue_norm", "Thành tiền"))` (tuyệt đối không nhân số lượng với ANY_VALUE của đơn giá!).
+   - Xếp hạng ngày hoặc khách có doanh thu cao nhất: `ORDER BY SUM(COALESCE("revenue_norm", "Thành tiền")) DESC LIMIT N`.
+   - Xếp hạng SẢN PHẨM bán chạy nhất: `ORDER BY SUM(COALESCE("qty_base", "Số lượng")) DESC LIMIT N` (xếp theo sản lượng bán ra).
    - Đếm đơn hàng: `SELECT COUNT(DISTINCT "Mã đơn hàng")` trên bảng chi tiết; không dùng `COUNT(*)` kẻo đếm nhầm dòng sản phẩm.
    - Xếp hạng khách hàng: Bỏ khách lẻ (`WHERE "Khách hàng" NOT ILIKE '%khách lẻ%' AND "Khách hàng" IS NOT NULL`).
+   - Tỉ lệ đơn hủy: KHÔNG được lọc bỏ đơn hủy trước khi tính (tuyệt đối không dùng `WHERE "status_norm" = 'Hoàn thành'`). Công thức: `COUNT(DISTINCT CASE WHEN "status_norm" = 'Đã hủy' THEN "Mã đơn hàng" END) * 100.0 / NULLIF(COUNT(DISTINCT "Mã đơn hàng"), 0)`.
+   - Tỉ trọng doanh thu nhóm/sản phẩm: Mẫu số phải là tổng doanh thu toàn shop (không dùng INNER JOIN làm co hẹp mẫu số). Ví dụ: `SUM(CASE WHEN "Nhóm" = '...' THEN "Thành tiền" ELSE 0 END) * 100.0 / NULLIF(SUM("Thành tiền"), 0)`.
+   - Tìm kiếm chuỗi tiếng Việt không dấu hoặc viết tắt: Dùng `WHERE strip_accents("Tên sản phẩm") ILIKE strip_accents('%từ khóa%')` (DuckDB hỗ trợ hàm `strip_accents()`).
+   - Hỏi số lượng ("bao nhiêu đĩa / cái / kg / ly / chai / lon / nồi"): Trả về SỐ LƯỢNG (cột `"Số lượng"` hoặc `"qty_base"`), KHÔNG phải doanh thu!
+   - Cột "business_id" đã có sẵn trong mọi bảng, dữ liệu trong DuckDB đã thuộc riêng shop hiện tại.
 2. Định dạng biến kết quả cuối cùng:
    - `number`: `result = {"type": "number", "answer": float(val)}`
    - `percent`: `result = {"type": "percent", "answer": float(val)}` (đã nhân 100, ví dụ: 15.5)
@@ -56,18 +64,24 @@ QUY TẮC CỐT LÕI (DUCKDB SQL):
 3. Chỉ trả về một khối mã ```python ... ``` duy nhất, không giải thích văn bản thừa."""
 
 # -----------------------------------------------------------------------------
-# PROMPT 2: Tư duy Thủ tục từng bước (Defensive Procedural / Step-by-Step Python)
+# PROMPT 2: Tư duy Phòng thủ từng bước với DuckDB CTE (Defensive CTE Engine)
 # -----------------------------------------------------------------------------
-SYSTEM_PROMPT_DEFENSIVE = """Bạn là Chuyên gia Khoa học Dữ liệu chú trọng tính chính xác và kiểm soát rủi ro (DataMate 2026).
-Nhiệm vụ: Viết mã Python xử lý tuần tự trên biến `tables` (dict DataFrames) hoặc `con` DuckDB, đặc biệt chú ý các điều kiện biên và quy tắc loại trừ.
+SYSTEM_PROMPT_DEFENSIVE_SQL = """Bạn là Chuyên gia Khoa học Dữ liệu chú trọng tính chính xác và kiểm soát rủi ro biên (DataMate 2026).
+Nhiệm vụ: Viết một đoạn mã Python sử dụng kết nối DuckDB `con` với kỹ thuật Common Table Expressions (WITH ... AS ...) để bóc tách bài toán thành từng bước phòng thủ chặt chẽ.
 
-QUY TẮC CỐT LÕI (PHÒNG THỦ TỪNG BƯỚC):
-1. Thực hiện xử lý phòng thủ theo từng bước rõ ràng:
-   - Bước 1 (Lọc an toàn): Loại bỏ ngay các dòng trạng thái 'Đã hủy', 'Trả hàng', hoặc các dòng tổng cộng/subtotal.
-   - Bước 2 (Lọc thời gian): Lọc đúng khoảng ngày yêu cầu trên cột ngày hoặc mốc thời gian đã cho (`date_context`).
-   - Bước 3 (Ghép nối & Phân nhóm): Ghép bảng theo khóa ngoại hoặc nhóm (`groupby`) theo đúng tiêu chí câu hỏi.
-   - Bước 4 (Tính toán): Tính tổng tiền, số lượng, hoặc tỷ lệ phần trăm (đã nhân 100).
-2. Kiểm tra an toàn: Nếu sau khi lọc dữ liệu rỗng, gán giá trị mặc định 0 hoặc danh sách rỗng, tránh lỗi crash.
+QUY TẮC CỐT LÕI (DEFENSIVE CTE DUCKDB RELATIONAL):
+1. Tổ chức truy vấn theo các bước CTE rõ ràng để kiểm soát dữ liệu:
+   - CTE 1 (valid_orders): Lọc đơn hàng hợp lệ theo ngày và loại bỏ đơn 'Đã hủy', 'Trả hàng' (CHÚ Ý: nếu tính tỉ lệ hủy đơn thì giữ lại đơn hủy để đếm).
+   - CTE 2 (filtered_data): Ghép nối với bảng chi tiết hoặc bảng danh mục theo khóa ngoại (`Mã đơn hàng`, `Mã sản phẩm`).
+   - CTE 3 (aggregated): Nhóm và tính toán tổng tiền, số lượng (`qty_base`), hoặc tỉ trọng.
+2. Quy tắc an toàn bắt buộc:
+   - Tên bảng và tên cột tiếng Việt có dấu, khoảng trắng BẮT BUỘC bọc trong ngoặc kép: `"Thành tiền"`, `"Mã đơn hàng"`, `"Ngày"`, `"Trạng thái"`.
+   - Lọc ngày: `WHERE CAST("Ngày" AS DATE) BETWEEN DATE 'start' AND DATE 'end'`.
+   - Doanh thu (revenue): Luôn là `SUM(COALESCE("revenue_norm", "Thành tiền"))`.
+   - Sản phẩm bán chạy nhất: Luôn xếp theo `SUM(COALESCE("qty_base", "Số lượng")) DESC` (sản lượng bán ra), KHÔNG xếp theo doanh thu.
+   - Tránh chia cho 0: Luôn dùng `NULLIF(..., 0)` ở mẫu số để tránh lỗi crash division by zero.
+   - So khớp chuỗi tiếng Việt không dấu: Dùng `strip_accents("Tên sản phẩm") ILIKE strip_accents('%từ khóa%')`.
+   - Bỏ khách lẻ khi xếp hạng khách hàng: `WHERE "Khách hàng" NOT ILIKE '%khách lẻ%' AND "Khách hàng" IS NOT NULL`.
 3. Định dạng biến kết quả cuối cùng:
    - `number`: `result = {"type": "number", "answer": float(val)}`
    - `percent`: `result = {"type": "percent", "answer": float(val)}` (đã nhân 100, ví dụ: 40.3)
@@ -77,6 +91,8 @@ QUY TẮC CỐT LÕI (PHÒNG THỦ TỪNG BƯỚC):
    - `table`: `result = {"columns": ["cột 1", "cột 2"], "rows": [[val1, val2], ...]}`
    - `unanswerable`: `result = {"type": "unanswerable", "reason": "..."}`
 4. Chỉ trả về một khối mã ```python ... ``` duy nhất, không giải thích văn bản thừa."""
+
+SYSTEM_PROMPT_DEFENSIVE = SYSTEM_PROMPT_DEFENSIVE_SQL
 
 # Mặc định tương thích ngược
 SYSTEM_PROMPT = SYSTEM_PROMPT_SQL
@@ -500,27 +516,24 @@ class DataMateAgent:
             few_shot_prompt=few_shot_prompt,
         )
 
-        # 1. Chạy Prompt 1: SQL-Centric (DuckDB Relational)
-        pred1, code1, raw1 = self._solve_single_prompt(
-            system_prompt=SYSTEM_PROMPT_SQL,
-            user_prompt=user_prompt,
-            qid=qid,
-            business_id=business_id,
-            as_of_date=as_of_date,
-            date_ctx=date_ctx,
-            expected_type=expected_type,
-            question=question,
-            seed=42,
-        )
-
-        p1_valid = (
-            isinstance(pred1, dict)
-            and pred1.get("type") in ("number", "percent", "date", "string", "list", "table", "boolean", "unanswerable")
-            and pred1.get("type") != "abstain"
-        )
-
         # Nếu cấu hình single prompt mode (chỉ Prompt 1)
         if self.consensus_mode == "single":
+            pred1, code1, raw1 = self._solve_single_prompt(
+                system_prompt=SYSTEM_PROMPT_SQL,
+                user_prompt=user_prompt,
+                qid=qid,
+                business_id=business_id,
+                as_of_date=as_of_date,
+                date_ctx=date_ctx,
+                expected_type=expected_type,
+                question=question,
+                seed=42,
+            )
+            p1_valid = (
+                isinstance(pred1, dict)
+                and pred1.get("type") in ("number", "percent", "date", "string", "list", "table", "boolean", "unanswerable")
+                and pred1.get("type") != "abstain"
+            )
             final_pred = pred1 if p1_valid else {"id": qid, "type": "abstain"}
             details = {
                 "id": qid,
@@ -540,19 +553,41 @@ class DataMateAgent:
             }
             return final_pred, details
 
-        # 2. Chạy Prompt 2: Defensive Step-by-Step (Pandas Procedural)
-        pred2, code2, raw2 = self._solve_single_prompt(
-            system_prompt=SYSTEM_PROMPT_DEFENSIVE,
-            user_prompt=user_prompt,
-            qid=qid,
-            business_id=business_id,
-            as_of_date=as_of_date,
-            date_ctx=date_ctx,
-            expected_type=expected_type,
-            question=question,
-            seed=100,
-        )
+        # Chạy Prompt 1 (SQL-Centric) và Prompt 2 (Defensive CTE SQL) ĐỒNG THỜI qua ThreadPoolExecutor
+        # Nhờ continuous batching của vLLM, cả 2 prompt được sinh song song trên GPU, giảm 50% thời gian chờ LLM
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            fut1 = executor.submit(
+                self._solve_single_prompt,
+                system_prompt=SYSTEM_PROMPT_SQL,
+                user_prompt=user_prompt,
+                qid=qid,
+                business_id=business_id,
+                as_of_date=as_of_date,
+                date_ctx=date_ctx,
+                expected_type=expected_type,
+                question=question,
+                seed=42,
+            )
+            fut2 = executor.submit(
+                self._solve_single_prompt,
+                system_prompt=SYSTEM_PROMPT_DEFENSIVE_SQL,
+                user_prompt=user_prompt,
+                qid=qid,
+                business_id=business_id,
+                as_of_date=as_of_date,
+                date_ctx=date_ctx,
+                expected_type=expected_type,
+                question=question,
+                seed=100,
+            )
+            pred1, code1, raw1 = fut1.result()
+            pred2, code2, raw2 = fut2.result()
 
+        p1_valid = (
+            isinstance(pred1, dict)
+            and pred1.get("type") in ("number", "percent", "date", "string", "list", "table", "boolean", "unanswerable")
+            and pred1.get("type") != "abstain"
+        )
         p2_valid = (
             isinstance(pred2, dict)
             and pred2.get("type") in ("number", "percent", "date", "string", "list", "table", "boolean", "unanswerable")
@@ -584,13 +619,11 @@ class DataMateAgent:
                 final_pred = {"id": qid, "type": "abstain"}
                 decision_reason = "strict_requires_both"
         elif p2_valid and not p1_valid:
-            if self.arbitration_strategy == "adaptive":
-                is_consensus = False
-                final_pred = pred2
-                decision_reason = "p2_valid_p1_failed_fallback"
-            else:
-                final_pred = {"id": qid, "type": "abstain"}
-                decision_reason = "strict_requires_both"
+            # Prompt 1 (SQL) thất bại là tín hiệu cảnh báo rủi ro cao:
+            # Dữ liệu thực nghiệm 300 câu chứng minh p2_valid_p1_failed chỉ đạt 29.5% độ chính xác
+            # (13 đúng, 31 sai, âm 18 điểm). Do đó, từ chối fallback này và abstain an toàn để bảo vệ điểm.
+            final_pred = {"id": qid, "type": "abstain"}
+            decision_reason = "p2_only_rejected_abstain"
         else:
             final_pred = {"id": qid, "type": "abstain"}
             decision_reason = "both_failed"

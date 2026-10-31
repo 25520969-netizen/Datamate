@@ -687,6 +687,7 @@ class BusinessDataStore:
                         if pq_path.exists():
                             tables[to_nfc(tbl_name)] = pd.read_parquet(pq_path)
                     if tables:
+                        tables = self._enrich_table_synonyms_and_id(tables, business_id)
                         self._mem_cache[business_id] = tables
                         return tables
             except Exception:
@@ -716,7 +717,59 @@ class BusinessDataStore:
             except Exception:
                 pass
 
+        tables = self._enrich_table_synonyms_and_id(tables, business_id)
         self._mem_cache[business_id] = tables
+        return tables
+
+    @staticmethod
+    def _enrich_table_synonyms_and_id(tables: Dict[str, pd.DataFrame], business_id: str) -> Dict[str, pd.DataFrame]:
+        """Bổ sung cột business_id và các alias cột phổ biến cho mọi bảng để chống Binder Error trong DuckDB/Pandas."""
+        for tbl_name, df in tables.items():
+            if "business_id" not in df.columns:
+                df["business_id"] = business_id
+
+            # Khách hàng
+            if "Tên KH" in df.columns and "Tên khách" not in df.columns:
+                df["Tên khách"] = df["Tên KH"]
+            if "Tên KH" in df.columns and "Tên khách hàng" not in df.columns:
+                df["Tên khách hàng"] = df["Tên KH"]
+            if "Khách hàng" in df.columns and "Tên khách" not in df.columns:
+                df["Tên khách"] = df["Khách hàng"]
+            if "Mã KH" in df.columns and "Mã khách hàng" not in df.columns:
+                df["Mã khách hàng"] = df["Mã KH"]
+            if "Mã khách hàng" in df.columns and "Mã KH" not in df.columns:
+                df["Mã KH"] = df["Mã khách hàng"]
+
+            # Đơn hàng / Chứng từ
+            for ord_col in ["Mã chứng từ", "Mã hóa đơn", "Số chứng từ", "SoCT", "Số HĐ", "Mã GD", "Mã đơn"]:
+                if ord_col in df.columns and "Mã đơn hàng" not in df.columns:
+                    df["Mã đơn hàng"] = df[ord_col]
+                    break
+            if "Mã đơn hàng" in df.columns and "Mã hóa đơn" not in df.columns:
+                df["Mã hóa đơn"] = df["Mã đơn hàng"]
+
+            # Trạng thái
+            if "status_norm" in df.columns and "Trạng thái" not in df.columns:
+                df["Trạng thái"] = df["status_norm"]
+            if "Trạng thái" in df.columns and "status_norm" not in df.columns:
+                df["status_norm"] = df["Trạng thái"]
+
+            # Thời gian / Ngày
+            if "Thời gian" in df.columns and "Ngày" not in df.columns:
+                df["Ngày"] = df["Thời gian"]
+            if "Ngày" in df.columns and "Thời gian" not in df.columns:
+                df["Thời gian"] = df["Ngày"]
+
+            # Sản phẩm
+            if "Tên hàng" in df.columns and "Tên sản phẩm" not in df.columns:
+                df["Tên sản phẩm"] = df["Tên hàng"]
+            if "Tên sản phẩm" in df.columns and "Tên hàng" not in df.columns:
+                df["Tên hàng"] = df["Tên sản phẩm"]
+            if "Mã hàng" in df.columns and "Mã sản phẩm" not in df.columns:
+                df["Mã sản phẩm"] = df["Mã hàng"]
+            if "Mã sản phẩm" in df.columns and "Mã hàng" not in df.columns:
+                df["Mã hàng"] = df["Mã sản phẩm"]
+
         return tables
 
     @staticmethod
@@ -1311,6 +1364,7 @@ class BusinessDataStore:
     def create_duckdb_connection(self, business_id: str) -> Tuple[duckdb.DuckDBPyConnection, Dict[str, pd.DataFrame]]:
         """Tạo kết nối DuckDB in-memory đã đăng ký sẵn toàn bộ các bảng của `business_id`."""
         tables = self.load_tables(business_id)
+        tables = self._enrich_table_synonyms_and_id(tables, business_id)
         con = duckdb.connect(database=":memory:")
         for tbl_name, df in tables.items():
             con.register(tbl_name, df)
@@ -1368,6 +1422,45 @@ class BusinessDataStore:
             f"=== DANH SÁCH BẢNG ĐÃ NẠP TRONG `tables` (Pandas dict) VÀ `con` (DuckDB) ===",
         ]
 
+        def _infer_semantic_role(tbl_name: str, cols: List[str]) -> str:
+            t_low = tbl_name.lower()
+            c_str = " ".join(cols).lower()
+            # 1. Bán hàng & Doanh thu (ưu tiên số 1 vì chứa số liệu cốt lõi)
+            if any(k in t_low or k in c_str for k in ["bán", "ban_hang", "hóa đơn", "hoa_don", "đơn hàng", "don_hang", "thành tiền", "thanh tien", "chi_tiet"]):
+                return "BẢNG BÁN HÀNG & DOANH THU"
+            # 2. Công nợ & Sổ quỹ
+            if any(k in t_low or k in c_str for k in ["nợ", "cong_no", "công nợ", "phiếu thu", "so_quy"]):
+                return "BẢNG CÔNG NỢ & THU CHI"
+            # 3. Tồn kho & Nhập hàng
+            if any(k in t_low or k in c_str for k in ["tồn", "ton_kho", "nhập", "nhap_hang", "hạn dùng", "hsd"]):
+                return "BẢNG TỒN KHO & NHẬP HÀNG"
+            # 4. Danh mục sản phẩm
+            if any(k in t_low or k in c_str for k in ["sản phẩm", "san_pham", "thuoc", "thuc_don", "danh mục"]):
+                return "BẢNG DANH MỤC SẢN PHẨM"
+            # 5. Danh mục khách hàng
+            if any(k in t_low or k in c_str for k in ["khách hàng", "khach_hang", "đối tác"]):
+                return "BẢNG THÔNG TIN KHÁCH HÀNG"
+            return "BẢNG DỮ LIỆU HOẠT ĐỘNG"
+
+        def _infer_col_type(col_name: str, series: pd.Series) -> str:
+            c_low = col_name.lower()
+            if any(k in c_low for k in ["ngày", "ngay", "thời gian", "date", "hạn dùng", "hsd"]):
+                return "TIMESTAMP"
+            if any(k in c_low for k in ["tiền", "tien", "giá", "gia", "doanh thu", "dthu", "lãi", "nợ", "chiết khấu"]):
+                return "DOUBLE"
+            if any(k in c_low for k in ["số lượng", "so luong", "qty", "tồn", "ton"]):
+                return "DOUBLE"
+            if series.dtype in ["float64", "float32"]:
+                return "DOUBLE"
+            if series.dtype in ["int64", "int32"]:
+                return "BIGINT"
+            non_null = series.dropna()
+            if len(non_null) > 0 and series.dtype == object:
+                uniq = non_null.unique().tolist()
+                if 1 < len(uniq) <= 4 and all(len(str(u)) <= 15 for u in uniq):
+                    return f"VARCHAR {uniq}"
+            return "VARCHAR"
+
         # Nhóm các bảng có cùng cấu trúc cột để tránh lặp lại hàng chục lần (như các bảng tháng của dev_005, dev_014)
         by_cols: Dict[Tuple[str, ...], List[Tuple[str, pd.DataFrame]]] = {}
         for tbl_name, df in tables.items():
@@ -1379,24 +1472,20 @@ class BusinessDataStore:
         for cols_key, grp in by_cols.items():
             tbl_names = [g[0] for g in grp]
             rep_df = grp[0][1]
-            col_parts = []
+
+            col_defs = []
             for col in cols_key:
-                non_null = rep_df[col].dropna()
-                if len(non_null) == 0:
-                    continue
-                if rep_df[col].dtype == object:
-                    uniq_vals = non_null.unique().tolist()
-                    if 1 < len(uniq_vals) <= 5 and all(len(str(u)) <= 18 for u in uniq_vals):
-                        col_parts.append(f"`{col}` ({uniq_vals})")
-                        continue
-                col_parts.append(f"`{col}`")
+                c_type = _infer_col_type(col, rep_df[col])
+                col_defs.append(f'    "{col}" {c_type}')
 
             if len(tbl_names) > 2:
-                tbl_desc = f"`{tbl_names[0]}` .. `{tbl_names[-1]}` ({len(tbl_names)} bảng: {', '.join(tbl_names[:3])}...)"
+                tbl_desc = f'"{tbl_names[0]}" .. "{tbl_names[-1]}" ({len(tbl_names)} bảng: {", ".join(tbl_names[:3])}...)'
             else:
-                tbl_desc = ", ".join(f"`{t}`" for t in tbl_names)
+                tbl_desc = ", ".join(f'"{t}"' for t in tbl_names)
 
-            lines.append(f"\n[Bảng: {tbl_desc}] Cột: " + "; ".join(col_parts))
+            role = _infer_semantic_role(tbl_names[0], list(cols_key))
+            lines.append(f"\n/* [Bảng: {tbl_desc}] [{role}] */")
+            lines.append(f'CREATE TABLE "{tbl_names[0]}" (\n' + ",\n".join(col_defs) + "\n);")
 
             if not rep_df.empty and max_sample_rows > 0:
                 sample_records = rep_df.head(max_sample_rows).to_dict(orient="records")
@@ -1404,6 +1493,6 @@ class BusinessDataStore:
                     row_json = json.dumps(r, ensure_ascii=False, default=str)
                     if len(row_json) > 350:
                         row_json = row_json[:347] + "..."
-                    lines.append(f"  Mẫu: {row_json}")
+                    lines.append(f"  -- Mẫu: {row_json}")
 
         return "\n".join(lines)

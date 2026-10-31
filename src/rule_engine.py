@@ -117,6 +117,39 @@ class DynamicEntityGrounder:
                 if len(matched_hints) >= 5:
                     break
 
+        # Vòng 2: Khớp cụm từ con (subphrase n-gram >= 2 từ, >= 8 ký tự)
+        # Cho phép các câu hỏi viết rút gọn ("nep cai hoa vang", "lau ga la e") khớp đúng thực thể trong DB
+        if len(matched_hints) < 5:
+            q_tokens = {t for t in re.split(r"[\s_]+", q_clean) if len(t) >= 2}
+            for key in sorted_keys:
+                if len(matched_hints) >= 5:
+                    break
+                if any(key in mk for mk in matched_keys):
+                    continue
+                clean_key = re.sub(r"\(.*?\)", "", key).strip()
+                toks = [t for t in re.split(r"[\s_]+", clean_key) if t]
+                if len(toks) < 2:
+                    continue
+                # Tối ưu: Nếu không có từ nào của key xuất hiện trong câu hỏi thì bỏ qua ngay lập tức
+                if not any(t in q_tokens for t in toks if len(t) >= 3):
+                    continue
+                matched = False
+                for n in range(len(toks), 1, -1):
+                    for i in range(len(toks) - n + 1):
+                        subphrase = " ".join(toks[i : i + n])
+                        if len(subphrase) >= 8 and re.search(r"(?:^|[^\w])" + re.escape(subphrase) + r"(?:[^\w]|$)", q_clean):
+                            matched = True
+                            break
+                    if matched:
+                        break
+                if matched:
+                    matched_keys.add(key)
+                    candidates = entity_map[key]
+                    best_cand = candidates[0]
+                    orig_name, dvt, col_name = best_cand
+                    dvt_str = f", ĐVT: '{dvt}'" if dvt else ""
+                    matched_hints.append(f"- '{orig_name}' (cột '{col_name}'{dvt_str})")
+
         if not matched_hints:
             return ""
 
@@ -441,13 +474,14 @@ class RuleEngine:
         is_expiry_q = any(k in q for k in ["hạn dùng", "han dung", "hạn sử dụng", "han su dung", "hsd", "hết hạn trong", "het han trong", "hết hạn vào", "het han vao"])
         if not is_expiry_q:
             s_min, s_max = store.get_shop_date_range(bid)
+            s_max_effective = max(s_max, as_of) if (as_of and s_max) else (s_max or as_of)
             d_ctx = date_resolver.resolve(question_obj.get("question", ""), as_of)
             for p in d_ctx.get("detected_periods", []):
                 st = p.get("start_date")
                 en = p.get("end_date")
                 if st and en:
-                    if en < s_min or st > s_max:
-                        return True, f"Kỳ hỏi ({st} đến {en}) nằm hoàn toàn ngoài khoảng ngày có dữ liệu của shop ({s_min} đến {s_max})."
+                    if en < s_min or (s_max_effective and st > s_max_effective):
+                        return True, f"Kỳ hỏi ({st} đến {en}) nằm hoàn toàn ngoài khoảng ngày có dữ liệu của shop ({s_min} đến {s_max_effective})."
 
         tables = store.load_tables(bid)
         all_cols = {c.lower() for df in tables.values() for c in df.columns}
@@ -744,6 +778,49 @@ class DAILFewShotSelector:
         "SELECT ROUND((chieu - sang) * 100.0 / NULLIF(sang, 0), 2) AS answer FROM shifts;"
     )
 
+    EXEMPLAR_DISTINCT_CUSTOMERS = (
+        "/* Ví dụ DAIL-O 9: Đếm số lượng khách hàng mua hàng (loại bỏ Khách lẻ) */\n"
+        "-- Câu hỏi: Trong tháng 8/2025 có bao nhiêu khách hàng khác nhau đến mua hàng?\n"
+        "-- Lưu ý: Dùng COUNT(DISTINCT ...) và bắt buộc loại trừ 'Khách lẻ':\n"
+        "SELECT COUNT(DISTINCT \"Khách hàng\") AS answer\n"
+        "FROM ban_hang\n"
+        "WHERE \"status_norm\" = 'Hoàn thành'\n"
+        "  AND CAST(\"Ngày\" AS DATE) BETWEEN DATE '2025-08-01' AND DATE '2025-08-31'\n"
+        "  AND \"Khách hàng\" NOT ILIKE '%khách lẻ%' AND \"Khách hàng\" IS NOT NULL;"
+    )
+
+    EXEMPLAR_SALES_BY_CHANNEL = (
+        "/* Ví dụ DAIL-O 10: Doanh thu theo từng kênh bán hàng hoặc hình thức thanh toán */\n"
+        "-- Câu hỏi: Doanh thu các đơn bán tại quầy và các đơn giao tận nơi trong tháng này mỗi loại bao nhiêu?\n"
+        "-- Lưu ý: Trả về dạng list [tien_quay, tien_giao] theo thứ tự hỏi:\n"
+        "SELECT [\n"
+        "  COALESCE(SUM(CASE WHEN \"Kênh bán\" ILIKE '%quầy%' THEN \"revenue_norm\" ELSE 0 END), 0),\n"
+        "  COALESCE(SUM(CASE WHEN \"Kênh bán\" ILIKE '%giao%' OR \"Kênh bán\" ILIKE '%ship%' THEN \"revenue_norm\" ELSE 0 END), 0)\n"
+        "] AS answer\n"
+        "FROM ban_hang\n"
+        "WHERE \"status_norm\" = 'Hoàn thành'\n"
+        "  AND CAST(\"Ngày\" AS DATE) BETWEEN DATE 'start_date' AND DATE 'end_date';"
+    )
+
+    EXEMPLAR_YTD_REVENUE = (
+        "/* Ví dụ DAIL-O 11: Doanh thu lũy kế từ đầu năm đến nay (Year-To-Date) */\n"
+        "-- Câu hỏi: Tính từ đầu năm đến hết ngày hôm nay (15/09/2026), tổng doanh thu là bao nhiêu?\n"
+        "-- Lưu ý: Lọc từ ngày 01/01 của năm đó đến as_of_date:\n"
+        "SELECT COALESCE(SUM(\"revenue_norm\"), 0) AS answer\n"
+        "FROM ban_hang\n"
+        "WHERE \"status_norm\" = 'Hoàn thành'\n"
+        "  AND CAST(\"Ngày\" AS DATE) BETWEEN DATE '2026-01-01' AND DATE '2026-09-15';"
+    )
+
+    EXEMPLAR_EXPIRY_GOODS = (
+        "/* Ví dụ DAIL-O 12: Đếm số mặt hàng cận date hoặc hết hạn sử dụng (HSD) */\n"
+        "-- Câu hỏi: Tính đến hôm nay, có mấy lô hàng đã hết hạn sử dụng?\n"
+        "-- Lưu ý: So sánh cột Hạn sử dụng với ngày hiện tại:\n"
+        "SELECT COUNT(*) AS answer\n"
+        "FROM ton_kho\n"
+        "WHERE CAST(\"Hạn sử dụng\" AS DATE) <= DATE '2025-06-30';"
+    )
+
     @classmethod
     def select_exemplars(cls, question: str, has_entity_hint: bool = False) -> str:
         """
@@ -776,11 +853,27 @@ class DAILFewShotSelector:
         if any(kw in q for kw in ["chay nhat", "hot nhat", "ban nhieu nhat", "ban chay nhat", "top 3 sp", "top 5 sp", "top 5 hang"]):
             selected.append(cls.EXEMPLAR_TOP_ITEMS_QTY_BASE)
 
-        # Intent 7: Hỏi về 1 món ăn / sản phẩm cụ thể
+        # Intent 7: Đếm số lượng khách hàng khác nhau
+        if any(kw in q for kw in ["khach hang khac nhau", "so khach den mua", "may khach den mua", "may khach mua", "bao nhieu khach hang den mua"]):
+            selected.append(cls.EXEMPLAR_DISTINCT_CUSTOMERS)
+
+        # Intent 8: Doanh thu theo kênh bán / hình thức
+        if any(kw in q for kw in ["moi loai bao nhieu", "moi hinh thuc bao nhieu", "ban tai quay va"]) and any(kw in q for kw in ["doanh thu", "dthu"]):
+            selected.append(cls.EXEMPLAR_SALES_BY_CHANNEL)
+
+        # Intent 9: Doanh thu lũy kế từ đầu năm (YTD)
+        if any(kw in q for kw in ["tu dau nam", "dau nam den nay", "luy ke tu dau nam"]):
+            selected.append(cls.EXEMPLAR_YTD_REVENUE)
+
+        # Intent 10: Hết hạn sử dụng / HSD / Cận date
+        if any(kw in q for kw in ["het han", "can date", "het date", "qua han dung"]):
+            selected.append(cls.EXEMPLAR_EXPIRY_GOODS)
+
+        # Intent 11: Hỏi về 1 món ăn / sản phẩm cụ thể
         if has_entity_hint and not any(kw in q for kw in ["chay nhat", "hot nhat", "ban nhieu nhat"]):
             selected.append(cls.EXEMPLAR_SINGLE_ITEM_QUERY)
 
-        # Intent 8: Công nợ khách hàng
+        # Intent 12: Công nợ khách hàng
         if any(kw in q for kw in ["cong no", "con no", "no nhieu nhat"]):
             selected.append(cls.EXEMPLAR_CUSTOMER_DEBT)
 

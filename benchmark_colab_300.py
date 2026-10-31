@@ -70,19 +70,38 @@ os.system(
 
 # 4. Lưu 2 file kết quả (Chính thức + Chi tiết đối chiếu 2 Prompt) về Google Drive
 print("\n💾 [3/4] Đang lưu 2 file kết quả về Google Drive...")
-drive_dir = Path("/content/drive/MyDrive")
-if drive_dir.exists():
-    for fname in ["predictions_sample300.jsonl", "predictions_sample300_details.jsonl"]:
-        local_f = Path(fname)
-        drive_f = drive_dir / fname
-        if local_f.exists():
-            shutil.copy(str(local_f), str(drive_f))
-            print(f"✅ Đã lưu {fname} tại: {drive_f}")
-else:
-    print("ℹ️ Thư mục /content/drive/MyDrive không tồn tại (chưa mount Drive). Các file kết quả được lưu tại thư mục hiện tại:")
-    for fname in ["predictions_sample300.jsonl", "predictions_sample300_details.jsonl"]:
-        if Path(fname).exists():
-            print(f"   - {Path(fname).resolve()}")
+drive_dest_dir = Path("/content/drive/MyDrive/zaloAI/ketqua")
+try:
+    drive_dest_dir.mkdir(parents=True, exist_ok=True)
+except Exception:
+    drive_dest_dir = Path("/content/drive/MyDrive")
+
+files_to_save = [
+    {
+        "local": Path("predictions_sample300.jsonl"),
+        "dest": drive_dest_dir / "predictions_sample300.jsonl",
+        "desc": "1. File kết quả chính thức (Submission Predictions - Đồng thuận & Abstain)",
+    },
+    {
+        "local": Path("predictions_sample300_details.jsonl"),
+        "dest": drive_dest_dir / "predictions_sample300_details.jsonl",
+        "desc": "2. File đối chiếu chi tiết 2 Prompt (Dual-Prompt Inspection & Audit Details)",
+    },
+]
+
+for item in files_to_save:
+    local_f = item["local"]
+    if not local_f.exists() and (Path("/content/Datamate") / local_f.name).exists():
+        local_f = Path("/content/Datamate") / local_f.name
+
+    if local_f.exists() and drive_dest_dir.exists():
+        shutil.copy(str(local_f), str(item["dest"]))
+        print(f"✅ {item['desc']}:")
+        print(f"   -> Đã lưu tại: {item['dest']}")
+    elif local_f.exists():
+        print(f"ℹ️ {item['desc']}: Đã tạo tại cục bộ {local_f.resolve()}")
+    else:
+        print(f"⚠️ Không tìm thấy file: {local_f}")
 
 # 5. Tắt GPU Colab
 print("\n🎉 [4/4] Hoàn tất 100%! Đang tự động ngắt GPU Colab để tiết kiệm Compute Units...")

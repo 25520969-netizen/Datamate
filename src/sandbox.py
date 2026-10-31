@@ -11,13 +11,16 @@ với giới hạn thời gian (timeout mặc định 10 giây), cung cấp sẵ
 Nếu có lỗi cú pháp hoặc Runtime Exception, trích xuất Traceback ngắn gọn để LLM tự sửa lỗi.
 """
 
+import ast
 import concurrent.futures
+import ctypes
 import json
 import math
 import re
 import subprocess
 import sys
 import tempfile
+import threading
 import traceback
 import unicodedata
 from datetime import date, datetime, timedelta
@@ -27,6 +30,18 @@ from typing import Any, Dict, List, Optional, Tuple
 import duckdb
 import numpy as np
 import pandas as pd
+
+
+def has_while_loop(code: str) -> bool:
+    """Kiểm tra mã nguồn có chứa vòng lặp while hay không qua AST để tránh rò rỉ thread in-process."""
+    try:
+        tree = ast.parse(code)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.While):
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def strip_accents(text: Any) -> str:
@@ -466,7 +481,10 @@ class PythonSandbox:
             "answer": None,
         }
 
+        worker_tid = [None]
+
         def _target():
+            worker_tid[0] = threading.get_ident()
             compiled = compile(cleaned_code, "<llm_generated_code>", "exec")
             exec(compiled, env, env)
             raw_res = env.get("result")
@@ -493,43 +511,64 @@ class PythonSandbox:
             raw_res = json.loads(json.dumps(raw_res, default=_serialize_default, ensure_ascii=False))
             return {"ok": True, "result": raw_res, "error": None}
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            fut = executor.submit(_target)
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        fut = executor.submit(_target)
+        try:
+            res = fut.result(timeout=self.timeout_seconds)
+            executor.shutdown(wait=False)
+            return res
+        except concurrent.futures.TimeoutError:
+            # 1. Hủy truy vấn DuckDB ở mức C++ engine nếu đang thực thi dở
             try:
-                return fut.result(timeout=self.timeout_seconds)
-            except concurrent.futures.TimeoutError:
-                return {
-                    "ok": False,
-                    "result": None,
-                    "error": f"TimeoutError: Code execution exceeded {self.timeout_seconds}s limit.",
-                }
-            except Exception as exc:
-                tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
-                user_frames = [
-                    line for line in tb_lines[:-1]
-                    if "<llm_generated_code>" in line
-                ]
-                tb_str = "".join(user_frames + [tb_lines[-1]]).strip()
-                code_lines = cleaned_code.splitlines()
-                line_nums = [int(x) for x in re.findall(r'File "<llm_generated_code>", line (\d+)', tb_str)]
-                offending_info = ""
-                if line_nums:
-                    ln_no = line_nums[-1]
-                    if 1 <= ln_no <= len(code_lines):
-                        offending_info = f"\nDòng gây lỗi (line {ln_no}): {code_lines[ln_no - 1].strip()}"
-                ordered_tbls = sorted(
-                    [(t, d) for t, d in tables.items() if not re.match(r"^.+?_(\d+|202[4-9])$", t)],
-                    key=lambda item: (0 if item[0] in cleaned_code else 1, item[0]),
-                )
-                schema_hint = "; ".join(
-                    f"{t}: { [c for c in d.columns if c != '_sheet_name'] }"
-                    for t, d in ordered_tbls
-                )
-                return {
-                    "ok": False,
-                    "result": None,
-                    "error": f"{tb_str}{offending_info}\nCác bảng và cột hợp lệ trong `tables` (ưu tiên bảng đang dùng): {schema_hint}",
-                }
+                raw_con.interrupt()
+            except Exception:
+                pass
+
+            # 2. Ngắt Python thread đang chạy bằng cách inject ngoại lệ SystemExit
+            if worker_tid[0] is not None:
+                try:
+                    ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                        ctypes.c_long(worker_tid[0]),
+                        ctypes.py_object(SystemExit),
+                    )
+                except Exception:
+                    pass
+
+            # 3. Đóng executor không block luồng chính
+            executor.shutdown(wait=False, cancel_futures=True)
+            return {
+                "ok": False,
+                "result": None,
+                "error": f"TimeoutError: Code execution exceeded {self.timeout_seconds}s limit.",
+            }
+        except Exception as exc:
+            executor.shutdown(wait=False, cancel_futures=True)
+            tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+            user_frames = [
+                line for line in tb_lines[:-1]
+                if "<llm_generated_code>" in line
+            ]
+            tb_str = "".join(user_frames + [tb_lines[-1]]).strip()
+            code_lines = cleaned_code.splitlines()
+            line_nums = [int(x) for x in re.findall(r'File "<llm_generated_code>", line (\d+)', tb_str)]
+            offending_info = ""
+            if line_nums:
+                ln_no = line_nums[-1]
+                if 1 <= ln_no <= len(code_lines):
+                    offending_info = f"\nDòng gây lỗi (line {ln_no}): {code_lines[ln_no - 1].strip()}"
+            ordered_tbls = sorted(
+                [(t, d) for t, d in tables.items() if not re.match(r"^.+?_(\d+|202[4-9])$", t)],
+                key=lambda item: (0 if item[0] in cleaned_code else 1, item[0]),
+            )
+            schema_hint = "; ".join(
+                f"{t}: { [c for c in d.columns if c != '_sheet_name'] }"
+                for t, d in ordered_tbls
+            )
+            return {
+                "ok": False,
+                "result": None,
+                "error": f"{tb_str}{offending_info}\nCác bảng và cột hợp lệ trong `tables` (ưu tiên bảng đang dùng): {schema_hint}",
+            }
 
     def _execute_subprocess(
         self,
@@ -611,6 +650,15 @@ class PythonSandbox:
             }
 
         if self.in_process:
+            # Nếu phát hiện vòng lặp while, chuyển sang subprocess để bảo đảm an toàn triệt để
+            # (tiến trình con có thể bị OS terminate/SIGKILL khi timeout, không làm rò rỉ thread in-process)
+            if has_while_loop(cleaned_code):
+                return self._execute_subprocess(
+                    cleaned_code=cleaned_code,
+                    business_id=business_id,
+                    as_of_date=as_of_date,
+                    date_context=date_context,
+                )
             try:
                 return self._execute_in_process(
                     cleaned_code=cleaned_code,

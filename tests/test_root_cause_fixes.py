@@ -17,9 +17,9 @@ import pytest
 
 from model.baseline import DataMateAgent, QwenCoderClient
 from src.ingest import BusinessDataStore
-from src.postprocess import postprocess_and_guard
+from src.postprocess import postprocess_and_guard, check_consensus, are_strings_in_consensus
 from src.rule_engine import DynamicEntityGrounder, strip_accents
-from src.sandbox import PythonSandbox
+from src.sandbox import PythonSandbox, has_while_loop
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -177,3 +177,111 @@ def test_arbitration_rejects_p2_fallback_to_protect_score(tmp_path: Path):
     pred, details = agent.answer_question_dual(q_obj)
     assert pred["type"] == "abstain"
     assert details["decision_reason"] == "p2_only_rejected_abstain"
+
+
+def test_sandbox_while_loop_routed_to_subprocess_and_terminates(tmp_path: Path):
+    """
+    Kiểm tra Lưu ý 1: Vòng lặp while được AST nhận diện tự động và điều hướng sang subprocess.
+    Khi chạy mã vòng lặp vô tận, sandbox subprocess chấm dứt an toàn qua timeout,
+    không để lại zombie thread chiếm CPU in-process.
+    """
+    code_while = """
+import time
+while True:
+    time.sleep(0.01)
+"""
+    assert has_while_loop(code_while) is True
+    assert has_while_loop("for i in range(10): pass") is False
+    assert has_while_loop("result = con.execute('SELECT 1').df()") is False
+
+    data_root = PROJECT_ROOT / "train_preprocessed_full"
+    if not data_root.exists():
+        data_root = PROJECT_ROOT / "train" / "data"
+
+    sandbox = PythonSandbox(
+        data_root=data_root,
+        cache_root=tmp_path / "cache",
+        timeout_seconds=1.0,
+        in_process=True,
+    )
+    # Thực thi mã có while True -> sandbox tự phát hiện và chạy qua subprocess với timeout 1.0s
+    res = sandbox.execute(
+        code=code_while,
+        business_id="biz_101",
+        as_of_date="2025-04-30",
+    )
+    assert res["ok"] is False
+    assert "TimeoutError" in str(res["error"])
+
+
+def test_sandbox_in_process_duckdb_interrupt_on_timeout(tmp_path: Path):
+    """
+    Kiểm tra Lưu ý 1: Trong chế độ in-process, nếu truy vấn DuckDB C++ bị treo quá timeout,
+    hàm raw_con.interrupt() và inject ngoại lệ SystemExit kích hoạt giải phóng tài nguyên ngay lập tức.
+    """
+    data_root = PROJECT_ROOT / "train_preprocessed_full"
+    if not data_root.exists():
+        data_root = PROJECT_ROOT / "train" / "data"
+
+    sandbox = PythonSandbox(
+        data_root=data_root,
+        cache_root=tmp_path / "cache",
+        timeout_seconds=0.5,
+        in_process=True,
+    )
+    # Truy vấn DuckDB tính toán rất nặng trên bảng lớn gây timeout
+    heavy_code = """
+import duckdb
+result = con.execute("SELECT count(*) FROM (SELECT range(1000000000))").df()
+"""
+    res = sandbox.execute(
+        code=heavy_code,
+        business_id="biz_101",
+        as_of_date="2025-04-30",
+    )
+    assert res["ok"] is False
+    assert "TimeoutError" in str(res["error"])
+
+
+def test_consensus_semantic_token_difference_product_variants():
+    """
+    Kiểm tra Lưu ý 2: Thuật toán so khớp an toàn ngữ nghĩa (Semantic Token Difference).
+    - Đồng thuận với các biến thể chỉ khác biệt về đơn vị đo lường hoặc tiền tố ngành hàng chung.
+    - TUYỆT ĐỐI KHÔNG ĐỒNG THUẬN (trả về False -> Abstain an toàn) với các biến thể sản phẩm khác nhau (Omo vs Omo Matic).
+    """
+    # 1. Các trường hợp biến thể sản phẩm khác nhau -> BẮT BUỘC BÁC BỎ (False)
+    assert are_strings_in_consensus("Bột giặt Omo", "Bột giặt Omo Matic") is False
+    assert are_strings_in_consensus("Bia Tiger", "Bia Tiger Crystal") is False
+    assert are_strings_in_consensus("Heineken", "Heineken Silver") is False
+    assert are_strings_in_consensus("Panadol", "Panadol Extra") is False
+    assert are_strings_in_consensus("Coca Cola", "Coca Cola Zero") is False
+    assert are_strings_in_consensus("Bia", "Bia lon") is False  # Không có từ nội dung riêng
+
+    # 2. Các trường hợp đúng cùng sản phẩm nhưng khác cách gọi đơn vị / tiền tố -> ĐỒNG THUẬN (True)
+    assert are_strings_in_consensus("Bia Tiger lon (lon)", "Bia Tiger lon") is True
+    assert are_strings_in_consensus("Bia Heineken lon", "Heineken lon") is True
+    assert are_strings_in_consensus("Bia Tiger", "Tiger") is True
+    assert are_strings_in_consensus("Gạo nếp cái hoa vàng (kg)", "Gạo nếp cái hoa vàng") is True
+    assert are_strings_in_consensus("Gạo nếp cái hoa vàng kg", "Gạo nếp cái hoa vàng") is True
+
+    # 3. Kiểm tra qua hàm check_consensus cấp cao cho kiểu string
+    assert check_consensus(
+        {"type": "string", "answer": "Bột giặt Omo"},
+        {"type": "string", "answer": "Bột giặt Omo Matic"},
+    ) is False
+
+    assert check_consensus(
+        {"type": "string", "answer": "Bia Tiger lon"},
+        {"type": "string", "answer": "Bia Tiger"},
+    ) is True
+
+    # 4. Kiểm tra qua hàm check_consensus cấp cao cho kiểu list
+    assert check_consensus(
+        {"type": "list", "answer": ["Bia Tiger lon", "Heineken"]},
+        {"type": "list", "answer": ["Bia Tiger", "Bia Heineken"]},
+    ) is True
+
+    assert check_consensus(
+        {"type": "list", "answer": ["Bột giặt Omo"]},
+        {"type": "list", "answer": ["Bột giặt Omo Matic"]},
+    ) is False

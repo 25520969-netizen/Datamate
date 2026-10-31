@@ -500,6 +500,70 @@ def postprocess_and_guard(
     return abstain_resp
 
 
+UNIT_TOKENS = {
+    "kg", "kilo", "g", "gram", "gr", "mg", "ml", "l", "lit",
+    "lon", "chai", "ly", "coc", "hop", "bich", "goi", "bao", "thung", "ket",
+    "dia", "to", "chen", "bat", "phan", "suat", "cai", "chiec", "binh", "hu",
+    "loc", "vi", "cay", "thanh", "cuon", "mieng", "tap", "can", "chuc", "doi", "cap",
+}
+
+CATEGORY_PREFIXES = {
+    "bia", "nuoc", "tra", "sua", "banh", "keo", "com", "lau", "mi", "bun", "pho",
+    "ca", "phe", "cafe", "bot", "giat",
+}
+
+IGNORABLE_TOKENS = UNIT_TOKENS | CATEGORY_PREFIXES
+
+
+def are_strings_in_consensus(a1: Any, a2: Any) -> bool:
+    """
+    So khớp chuỗi an toàn ngữ nghĩa (Semantic Token Difference).
+    - Đồng thuận nếu chuỗi hoàn toàn trùng nhau hoặc chỉ khác biệt về đơn vị tính / tiền tố ngành hàng chung.
+    - TUYỆT ĐỐI BÁC BỎ nếu khác biệt về tên sản phẩm, biến thể, sub-brand (Omo vs Omo Matic, Tiger vs Tiger Crystal).
+    """
+    if a1 is None or a2 is None:
+        return False
+    s1 = unicodedata.normalize("NFC", str(a1)).strip().lower()
+    s2 = unicodedata.normalize("NFC", str(a2)).strip().lower()
+    if not s1 or not s2:
+        return False
+    if s1 == s2:
+        return True
+
+    # Loại bỏ hậu tố mô tả kích thước / đơn vị tính trong ngoặc đơn
+    c1 = re.sub(r"\s*\([^)]+\)$", "", strip_trailing_measurement_in_parens(s1)).strip()
+    c2 = re.sub(r"\s*\([^)]+\)$", "", strip_trailing_measurement_in_parens(s2)).strip()
+    if c1 == c2:
+        return True
+
+    a1_norm = strip_accents(c1)
+    a2_norm = strip_accents(c2)
+    if a1_norm == a2_norm:
+        return True
+
+    toks1 = [t for t in re.split(r"[\s,_\-./()]+", a1_norm) if t]
+    toks2 = [t for t in re.split(r"[\s,_\-./()]+", a2_norm) if t]
+    set1 = set(toks1)
+    set2 = set(toks2)
+    if not set1 or not set2:
+        return False
+    if set1 == set2:
+        return True
+
+    # Một tập phải là tập con thật sự của tập kia (chỉ khác ở các từ bổ sung một chiều)
+    if not (set1 < set2 or set2 < set1):
+        return False
+
+    # Tất cả các từ khác biệt bắt buộc phải nằm trong IGNORABLE_TOKENS (đơn vị hoặc tiền tố ngành hàng)
+    diff = set1 ^ set2
+    if not (diff <= IGNORABLE_TOKENS):
+        return False
+
+    # Phần giao giữa 2 chuỗi phải chứa ít nhất một từ nội dung cốt lõi không phải từ ignorable
+    common_content = (set1 & set2) - IGNORABLE_TOKENS
+    return len(common_content) > 0
+
+
 def check_consensus(pred1: Dict[str, Any], pred2: Dict[str, Any]) -> bool:
     """
     Kiểm tra tính đồng thuận giữa hai lời giải độc lập (Dual-Prompt Consensus Gate).
@@ -563,18 +627,7 @@ def check_consensus(pred1: Dict[str, Any], pred2: Dict[str, Any]) -> bool:
 
     # 4. So khớp STRING
     if t1 == "string":
-        s1 = unicodedata.normalize("NFC", str(a1)).strip().lower()
-        s2 = unicodedata.normalize("NFC", str(a2)).strip().lower()
-        if s1 == s2:
-            return True
-        c1 = re.sub(r"\s*\([^)]+\)$", "", strip_trailing_measurement_in_parens(s1)).strip()
-        c2 = re.sub(r"\s*\([^)]+\)$", "", strip_trailing_measurement_in_parens(s2)).strip()
-        if c1 == c2:
-            return True
-        # Nếu một chuỗi là tiền tố/chuỗi con của chuỗi kia với độ tương đồng >= 60%
-        if (c1 in c2 or c2 in c1) and min(len(c1), len(c2)) >= 4 and (min(len(c1), len(c2)) / max(len(c1), len(c2)) >= 0.6):
-            return True
-        return False
+        return are_strings_in_consensus(a1, a2)
 
     # 5. So khớp LIST
     if t1 == "list":
@@ -589,9 +642,7 @@ def check_consensus(pred1: Dict[str, Any], pred2: Dict[str, Any]) -> bool:
                 if diff >= 1e-4 and (max_v == 0 or diff / max_v >= 1e-5):
                     return False
             else:
-                sx = re.sub(r"\s*\([^)]+\)$", "", strip_trailing_measurement_in_parens(unicodedata.normalize("NFC", str(x)).strip().lower())).strip()
-                sy = re.sub(r"\s*\([^)]+\)$", "", strip_trailing_measurement_in_parens(unicodedata.normalize("NFC", str(y)).strip().lower())).strip()
-                if sx != sy and not ((sx in sy or sy in sx) and min(len(sx), len(sy)) >= 4 and min(len(sx), len(sy)) / max(len(sx), len(sy)) >= 0.6):
+                if not are_strings_in_consensus(x, y):
                     return False
         return True
 
@@ -615,9 +666,7 @@ def check_consensus(pred1: Dict[str, Any], pred2: Dict[str, Any]) -> bool:
                     if diff >= 1e-4 and (max_v == 0 or diff / max_v >= 1e-5):
                         return False
                 else:
-                    s1 = unicodedata.normalize("NFC", str(c1)).strip().lower()
-                    s2 = unicodedata.normalize("NFC", str(c2)).strip().lower()
-                    if s1 != s2:
+                    if not are_strings_in_consensus(c1, c2):
                         return False
         return True
 

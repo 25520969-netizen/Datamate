@@ -300,7 +300,7 @@ _VN_TEXT_DATE_RE = re.compile(
 )
 _EXCEL_SERIAL_RE = re.compile(r"^\d{5}(?:\.\d+)?$")
 _ISO_MIDNIGHT_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})[T\s]+00:00(?::00)?(?:\.0+)?$")
-CACHE_VERSION = "v8"
+CACHE_VERSION = "v11"
 
 
 def parse_vn_numeric_value(val: Any, is_qty_col: bool = False) -> Optional[float]:
@@ -979,6 +979,15 @@ class BusinessDataStore:
                     if alias not in df.columns:
                         df[alias] = df[dt_found]
 
+            # Nếu cột 'Thời gian' chỉ chứa ngày (không có giờ phút), nhưng có cột datetime chi tiết hơn, ưu tiên cột chi tiết
+            if "Thời gian" in df.columns:
+                detailed_dt = next(
+                    (c for c in df.columns if c != "Thời gian" and any(k in c.lower() for k in ["thời gian", "thoi gian", "created", "datetime", "giờ", "gio"]) and df[c].astype(str).str.contains(r"\d{1,2}:\d{2}").any()),
+                    None
+                )
+                if detailed_dt:
+                    df["Thời gian"] = df[detailed_dt]
+
             # Tạo alias cột trạng thái chuẩn ('Trạng thái') trên mọi bảng có cột trạng thái
             st_found = next(
                 (c for c in df.columns if c.lower().strip() in ORDER_STATUS_COL_NAMES or any(c.lower().strip().startswith(p) for p in ["trạng thái", "trang thai", "tt đơn", "tình trạng", "ghi chú tt"])),
@@ -998,6 +1007,59 @@ class BusinessDataStore:
                         return "Hoàn thành"
                     return str(v)
                 df["status_norm"] = df["Trạng thái"].map(_norm_status_val)
+
+            # 2c. Tạo alias cột tên sản phẩm chuẩn ('Tên hàng')
+            if "Tên hàng" not in df.columns:
+                item_found = next(
+                    (c for c in df.columns if any(c.lower().strip() == p for p in [
+                        "tên hàng", "tên sản phẩm", "tên hàng hóa", "tên mặt hàng", "hàng bán", "mặt hàng",
+                        "hàng", "product", "nội dung", "sản phẩm", "ten_hang", "ten hang", "ten san pham"
+                    ])),
+                    None
+                )
+                if item_found:
+                    df["Tên hàng"] = df[item_found]
+
+            # 2d. Tạo alias cột số lượng quy đổi ra đơn vị cơ bản lẻ ('qty_base')
+            if "qty_base" not in df.columns:
+                base_qty_col = next(
+                    (c for c in df.columns if any(c.lower().strip() == p for p in [
+                        "qty_base", "sl lẻ", "số lượng lẻ", "quy ra đv lẻ", "sl quy đổi", "số lượng quy đổi",
+                        "sl cơ bản", "số lượng cơ bản", "sl thực giao", "quy_ra_dv_le"
+                    ])),
+                    None
+                )
+                if base_qty_col:
+                    df["qty_base"] = df[base_qty_col]
+                else:
+                    raw_qty_col = next(
+                        (c for c in df.columns if any(c.lower().strip() == p for p in [
+                            "số lượng", "so_luong", "soluong", "số lượng sản phẩm", "số lượng bán", "sl bán", "sl"
+                        ])),
+                        None
+                    )
+                    if raw_qty_col:
+                        df["qty_base"] = df[raw_qty_col]
+
+            # 2e. Tạo alias cột doanh thu thuần tiền hàng ('revenue_norm')
+            if "revenue_norm" not in df.columns:
+                pure_rev_col = next(
+                    (c for c in df.columns if any(c.lower().strip() == p for p in [
+                        "tien hang", "tiền hàng", "thành tiền", "thanh tien", "thành tiền (đ)", "amount", "tổng tiền hàng"
+                    ])),
+                    None
+                )
+                if pure_rev_col:
+                    df["revenue_norm"] = df[pure_rev_col]
+                else:
+                    tot_rev_col = next(
+                        (c for c in df.columns if any(c.lower().strip() == p for p in [
+                            "tổng tiền", "tongtien", "tongcong", "tổng cộng", "tiền", "thành tiền"
+                        ])),
+                        None
+                    )
+                    if tot_rev_col:
+                        df["revenue_norm"] = df[tot_rev_col]
 
             ord_col = next((c for c in df.columns if c in all_order_id_cols), None)
             if not ord_col:
@@ -1048,7 +1110,7 @@ class BusinessDataStore:
                 for ct_name in [k for k in tables if k.startswith("DanhSachHoaDonChiTiet") and k != "DanhSachHoaDonChiTietLo"]:
                     ct_hd = tables[ct_name]
                     if "Mã hóa đơn" in ct_hd.columns:
-                        for col_to_copy in ("Thời gian", "Trạng thái", "Mã KH", "Khách hàng", "Kênh bán", "Phương thức thanh toán", "Người bán"):
+                        for col_to_copy in ("Thời gian", "Trạng thái", "status_norm", "Mã KH", "Khách hàng", "Kênh bán", "Phương thức thanh toán", "Người bán"):
                             if col_to_copy in hd_dedup.columns and col_to_copy not in ct_hd.columns:
                                 mapper = hd_dedup.set_index("Mã hóa đơn")[col_to_copy]
                                 ct_hd[col_to_copy] = ct_hd["Mã hóa đơn"].map(mapper)
@@ -1118,7 +1180,9 @@ class BusinessDataStore:
                 dh_dedup = dh_df.drop_duplicates(subset=[dh_ord_col]).set_index(dh_ord_col)
                 for src_col, target_col in [
                     ("Ngày", "Ngày"),
+                    ("Thời gian", "Thời gian"),
                     ("Trạng thái", "Trạng thái"),
+                    ("status_norm", "status_norm"),
                     ("Phương thức TT", "Phương thức TT"),
                     ("Kênh bán", "Kênh bán"),
                     ("Bán qua", "Kênh bán"),
@@ -1157,6 +1221,22 @@ class BusinessDataStore:
                     for col_to_copy in ("Hoạt chất", "Thuốc kê đơn", "Kê đơn", "Nhom hang", "DanhMuc"):
                         if col_to_copy in sp_dedup.columns and col_to_copy not in ct_df.columns:
                             ct_df[col_to_copy] = ct_df[ct_prod_col].map(sp_dedup[col_to_copy])
+
+        # Đảm bảo mọi bảng có 'Trạng thái' đều có 'status_norm', và mọi bảng có 'Ngày' đều có 'Thời gian'
+        for tbl_name, df in tables.items():
+            if "Trạng thái" in df.columns and "status_norm" not in df.columns:
+                def _norm_st(v: Any) -> str:
+                    s = str(v).lower().strip()
+                    if any(k in s for k in ["hủy", "huỷ", "cancel"]):
+                        return "Đã hủy"
+                    if any(k in s for k in ["trả", "tra hang", "return"]):
+                        return "Trả hàng"
+                    if any(k in s for k in ["hoàn thành", "thành công", "xong", "đã lấy", "completed", "finish", "hoàn tất", "hoan tat"]):
+                        return "Hoàn thành"
+                    return str(v)
+                df["status_norm"] = df["Trạng thái"].map(_norm_st)
+            if "Ngày" in df.columns and "Thời gian" not in df.columns:
+                df["Thời gian"] = df["Ngày"]
 
         return tables
 

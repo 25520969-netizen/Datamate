@@ -20,7 +20,7 @@ import requests
 from src.date_resolver import DateResolver
 from src.ingest import BusinessDataStore
 from src.postprocess import postprocess_and_guard
-from src.rule_engine import DynamicEntityGrounder, RuleEngine
+from src.rule_engine import DAILFewShotSelector, DynamicEntityGrounder, RuleEngine
 from src.sandbox import PythonSandbox
 
 
@@ -41,23 +41,23 @@ MÔI TRƯỜNG SANDBOX:
 
 QUY TẮC CỐT LÕI:
 1. PHÂN BIỆT SỐ LƯỢNG HÀNG vs DOANH THU & XẾP HẠNG BÁN CHẠY:
-   - Khi câu hỏi hỏi bán chạy nhất / bán nhiều nhất / hot nhất: BẮT BUỘC THEO SỐ LƯỢNG QUY VỀ ĐƠN VỊ CƠ BẢN (Mục 3 Rulebook). ƯU TIÊN SỐ 1 CỘT ĐƠN VỊ CƠ BẢN ('qty_base', 'SL lẻ', 'Quy ra ĐV lẻ', 'Số lượng lẻ', 'SL cơ bản') nếu bảng có cột này, vì các mặt hàng khác nhau về quy cách đóng gói (thùng/lon/chai). Nếu bảng không có cột đơn vị cơ bản mới dùng ('Số lượng', 'SoLuong', 'Số lượng bán', 'SL bán', 'so_luong', 'Số lượng sản phẩm'). TUYỆT ĐỐI KHÔNG xếp hạng bán chạy theo doanh thu / thành tiền!
+   - Khi câu hỏi hỏi bán chạy nhất / bán nhiều nhất / hot nhất: BẮT BUỘC THEO SỐ LƯỢNG QUY VỀ ĐƠN VỊ CƠ BẢN (Mục 3 Rulebook). ƯU TIÊN SỐ 1 CỘT ĐƠN VỊ CƠ BẢN ('qty_base', 'SL lẻ', 'Quy ra ĐV lẻ', 'Số lượng lẻ', 'SL cơ bản') nếu bảng có cột này, vì các mặt hàng khác nhau về quy cách đóng gói (thùng/lon/chai). BẮT BUỘC dùng `ORDER BY SUM(COALESCE("qty_base", "Số lượng")) DESC`. TUYỆT ĐỐI KHÔNG xếp hạng bán chạy theo doanh thu / thành tiền!
+   - Khi câu hỏi hỏi về MỘT MÓN ĂN / MẶT HÀNG CỤ THỂ (hoặc có gợi ý thực thể): BẮT BUỘC PHẢI THÊM ĐIỀU KIỆN LỌC TÊN MÓN TRONG WHERE (ví dụ: `WHERE "Tên hàng" ILIKE '%cơm chiên dương châu%'`). TUYỆT ĐỐI KHÔNG tính tổng cả tháng của toàn cửa hàng!
    - Khi câu hỏi hỏi số lượng cụ thể: 'bao nhiêu nồi', 'bao nhiêu đĩa', 'mấy đĩa', 'mấy nồi', 'bao nhiêu kg', 'may kg', 'số kg', 'so kg', 'số lượng kg', 'mấy lon', 'bao nhiêu lon', 'số lon', 'mấy gói', 'bao nhiêu gói', 'số gói', 'bao nhiêu chai', 'mấy chai', 'số chai', 'bao nhiêu hộp', 'mấy hộp', 'số hộp', 'bao nhiêu chiếc', 'mấy chiếc', 'số chiếc', 'bao nhiêu cái', 'mấy cái', 'số cái', 'bao nhiêu ly', 'mấy ly', 'số ly', 'bao nhiêu bao', 'mấy bao', 'số bao', 'bao nhiêu vỉ', 'mấy vỉ', 'số vỉ', 'bao nhiêu viên', 'mấy viên', 'số viên', 'bao nhiêu tuýp', 'mấy tuýp', 'số tuýp', 'bao nhiêu thùng', 'mấy thùng', 'số thùng', 'bao nhiêu lốc', 'mấy lốc', 'số lốc', 'bao nhiêu lít', 'mấy lít', 'số lít', 'số lượng', 'lượng bán': BẮT BUỘC TÍNH TỔNG TRỰC TIẾP TỪ CỘT SỐ LƯỢNG ('Số lượng', 'SoLuong', 'SL bán', 'so_luong', 'Số lượng sản phẩm', 'Số lượng bán') CỦA MẶT HÀNG ĐÓ. TUYỆT ĐỐI KHÔNG tự ý nhân thêm bảng quy đổi nếu câu hỏi đã hỏi đúng đơn vị ghi nhận trong bảng (vd: hỏi bao nhiêu kg mà đơn vị bán đã là kg thì sum trực tiếp cột số lượng)! TUYỆT ĐỐI KHÔNG TÍNH TỔNG TIỀN / THÀNH TIỀN KHI HỎI SỐ LƯỢNG!
-   - Khi câu hỏi hỏi tiền / doanh thu: 'bao nhiêu tiền', 'mấy đồng', 'doanh thu', 'dthu', 'tiền hàng', 'thu về bao nhiêu', 'trị giá bao nhiêu': BẮT BUỘC LẤY CỘT TIỀN HÀNG ('Tổng tiền hàng', 'Thành tiền', 'Giá trị hàng', 'thanh_tien', 'Tổng tiền', 'Thành tiền (đ)', 'Tien hang', 'Tiền', 'Tổng', 'T.Tiền'). TUYỆT ĐỐI KHÔNG dùng cột 'Tổng sau giảm giá' hay 'Khách đã trả' (vì các cột này đã bị trừ voucher/khuyến mãi toàn đơn hoặc cộng phí vận chuyển).
+   - Khi câu hỏi hỏi tiền / doanh thu: 'bao nhiêu tiền', 'mấy đồng', 'doanh thu', 'dthu', 'tiền hàng', 'thu về bao nhiêu', 'trị giá bao nhiêu': ƯU TIÊN SỐ 1 DÙNG CỘT TIỀN HÀNG THUẦN ('revenue_norm', 'Tien hang', 'Tiền hàng', 'Thành tiền', 'Giá trị hàng', 'thanh_tien', 'Amount', 'Thành tiền (đ)'). TUYỆT ĐỐI KHÔNG dùng cột 'TongTien', 'Tổng sau giảm giá' hay 'Khách đã trả' (vì các cột này bị cộng thêm phụ phí, phí vận chuyển hoặc tiền tip).
    - Lọc đơn hợp lệ (bắt buộc khi tính doanh thu, số đơn, số lượng bán, bán chạy nhất):
      + Trong pandas: `df[~df['Trạng thái'].astype(str).str.lower().str.contains('hủy|huỷ|trả|cancel|return', regex=True)]`
      + Trong DuckDB SQL: `WHERE ("Trạng thái" NOT ILIKE '%hủy%' AND "Trạng thái" NOT ILIKE '%huỷ%' AND "Trạng thái" NOT ILIKE '%trả%' AND "Trạng thái" NOT ILIKE '%cancel%' AND "Trạng thái" NOT ILIKE '%return%')` (hoặc nếu có cột status_norm: `WHERE "status_norm" = 'Hoàn thành'`).
      TUYỆT ĐỐI KHÔNG dùng từ 'hoàn' để lọc vì sẽ lọc mất 'Hoàn thành' / 'Đã hoàn thành' (đây là đơn bán thành công hợp lệ!). Các đơn 'Hoàn thành', 'Đã hoàn thành', 'Thành công', 'xong', 'đã lấy', 'completed' BẮT BUỘC PHẢI GIỮ LẠI.
    - Lưu ý Mục 3 Rulebook: Mặt hàng dịch vụ 'Phí phục vụ' KHÔNG PHẢI MẶT HÀNG BÁN và bắt buộc loại trừ khi xếp hạng mặt hàng bán chạy / doanh thu / số lượng.
 2. TỈ LỆ ĐƠN HỦY VÀ PHẦN TRĂM:
-   - Tỉ lệ đơn hủy: KHÔNG lọc bỏ đơn hủy!
-     + Nếu bảng có cột mã đơn (Mã đơn hàng, Mã hóa đơn, Mã phiếu, Mã bill, Mã GD, Mã chứng từ):
-       `order_status = df.groupby(cột_mã_đơn)['Trạng thái'].first()`
-       `cancel_rate = (order_status.astype(str).str.lower().str.contains('hủy|huỷ')).sum() / len(order_status) * 100`
-     + Nếu bảng không có cột mã đơn (mỗi dòng là một đơn):
-       `cancel_rate = (df['Trạng thái'].astype(str).str.lower().str.contains('hủy|huỷ')).sum() / len(df) * 100`
-     TUYỆT ĐỐI KHÔNG đếm số dòng (len(df)) trên bảng chi tiết đơn hàng vì một đơn có nhiều dòng sản phẩm!
-   - Quy tắc "cùng kỳ tháng trước" (Mục 2 Rulebook): Nếu hôm nay là ngày D trong tháng M (vd: 2025-03-15), "cùng kỳ tháng trước" BẮT BUỘC là từ ngày 1 đến ngày D của tháng M-1 (vd: 2025-02-01 đến 2025-02-15), TUYỆT ĐỐI KHÔNG lấy cả tháng M-1. Tương tự, so sánh tuần này vs tuần trước là so sánh cùng số ngày tương ứng.
+   - Tỉ lệ đơn hủy (Cancellation Rate): KHÔNG lọc bỏ đơn hủy!
+     + Trong DuckDB SQL: BẮT BUỘC DÙNG `SELECT ROUND(COUNT(DISTINCT CASE WHEN "status_norm" = 'Đã hủy' THEN "cột_mã_đơn" END) * 100.0 / NULLIF(COUNT(DISTINCT "cột_mã_đơn"), 0), 2)`. TUYỆT ĐỐI KHÔNG DÙNG `COUNT(*)` đếm số dòng sản phẩm!
+     + Trong pandas: `order_status = df.groupby(cột_mã_đơn)['Trạng thái'].first(); cancel_rate = (order_status.astype(str).str.lower().str.contains('hủy|huỷ')).sum() / len(order_status) * 100`
+   - Phân biệt các khái niệm so sánh thời gian:
+     + 'So với tháng liền trước' / 'so với tháng trước': So với CẢ THÁNG M-1 (ví dụ: T6/2026 so với cả T5/2026, TUYỆT ĐỐI KHÔNG so với cùng kỳ năm trước T6/2025).
+     + 'Cùng kỳ tháng trước': Từ ngày 1 đến cùng ngày D của tháng M-1 (ví dụ: 01/07/2026-15/07/2026 so với 01/06/2026-15/06/2026).
+     + 'Cùng kỳ năm trước': So với cùng tháng M của năm Y-1 (ví dụ: T5/2026 so với T5/2025).
    - Định dạng percent: BẮT BUỘC LÀ SỐ ĐÃ NHÂN 100 (ví dụ 40.3 chứ TUYỆT ĐỐI KHÔNG để 0.403; 35.17 chứ không phải 0.3517). Result: `{"type": "percent", "answer": 40.3}`.
    - Tỉ trọng / Đóng góp: Tỉ lệ của một phần so với toàn bộ không bao giờ vượt quá 100% (nằm trong khoảng 0% đến 100%).
 3. Xếp hạng khách hàng: Đơn không có mã hoặc ghi 'Khách lẻ' / 'lẻ' / 'kl' KHÔNG PHẢI KHÁCH và không tính vào xếp hạng khách hàng. Bắt buộc loại bỏ:
@@ -263,6 +263,7 @@ class DataMateAgent:
         self.date_resolver = DateResolver(calendar_path=calendar_path)
         self.rule_engine = RuleEngine(rulebook_path=rulebook_path)
         self.entity_grounder = DynamicEntityGrounder()
+        self.few_shot_selector = DAILFewShotSelector()
         self.sandbox = PythonSandbox(
             data_root=data_root,
             cache_root=cache_root,
@@ -280,6 +281,7 @@ class DataMateAgent:
         rules_prompt: str,
         schema_prompt: str,
         entity_hints: str = "",
+        few_shot_prompt: str = "",
     ) -> str:
         question = question_obj["question"]
         as_of_date = question_obj["as_of_date"]
@@ -297,6 +299,8 @@ class DataMateAgent:
         ]
         if entity_hints:
             parts.append(entity_hints)
+        if few_shot_prompt:
+            parts.append(few_shot_prompt)
         parts.extend([
             f"=== LUẬT NGHIỆP VỤ RULEBOOK CẦN ÁP DỤNG ===\n{rules_prompt}",
             "=== YÊU CẦU SINH MÃ PYTHON ===\n"
@@ -322,6 +326,10 @@ class DataMateAgent:
             biz_readme = self.store.get_readme(business_id)
             tables = self.store.load_tables(business_id)
             entity_hints = self.entity_grounder.find_grounding_hints(question, business_id, tables)
+            few_shot_prompt = self.few_shot_selector.select_exemplars(
+                question=question,
+                has_entity_hint=bool(entity_hints and entity_hints.strip()),
+            )
             expected_type = self.rule_engine.infer_expected_type(question)
             date_ctx = self.date_resolver.resolve(question, as_of_date)
             date_prompt = self.date_resolver.format_for_prompt(question, as_of_date)
@@ -346,6 +354,7 @@ class DataMateAgent:
             rules_prompt=rules_prompt,
             schema_prompt=schema_prompt,
             entity_hints=entity_hints,
+            few_shot_prompt=few_shot_prompt,
         )
 
         messages: List[Dict[str, str]] = [

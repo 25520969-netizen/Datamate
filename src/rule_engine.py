@@ -537,3 +537,175 @@ class RuleEngine:
             return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
         except ValueError:
             return None
+
+
+class DAILFewShotSelector:
+    """
+    Kỹ thuật Few-Shot In-Context Learning theo kiến trúc DAIL-SQL (Alibaba Group, PVLDB/arXiv:2308.15363).
+    - DAIL-O (DAIL Organization): Giữ cấu trúc Question -> SQL mẫu, loại bỏ schema lặp lại của DB ví dụ để tiết kiệm token tối đa.
+    - DAIL-S (DAIL Selection): Nhận diện khung xương truy vấn (Query Skeleton Intent) để chọn đúng 1-2 ví dụ chuẩn nhất.
+    """
+
+    EXEMPLAR_CANCEL_RATE = (
+        "/* Ví dụ DAIL-O 1: Tính tỉ lệ đơn huỷ (%) trong kỳ */\n"
+        "-- Câu hỏi: Trong tháng 5/2025, tỉ lệ đơn huỷ là bao nhiêu phần trăm?\n"
+        "-- Lưu ý: BẮT BUỘC dùng COUNT(DISTINCT ...) cho cả tử số (đơn hủy) và mẫu số (tổng đơn). Không đếm số dòng sản phẩm:\n"
+        "SELECT ROUND(\n"
+        "  COUNT(DISTINCT CASE WHEN \"status_norm\" = 'Đã hủy' THEN \"Mã đơn\" END) * 100.0 / \n"
+        "  NULLIF(COUNT(DISTINCT \"Mã đơn\"), 0), \n"
+        "  2\n"
+        ") AS answer\n"
+        "FROM don_hang\n"
+        "WHERE \"Thời gian\" >= '2025-05-01' AND \"Thời gian\" < '2025-06-01';"
+    )
+
+    EXEMPLAR_GROWTH_PREV_MONTH = (
+        "/* Ví dụ DAIL-O 2: So sánh doanh thu với tháng liền trước (%) */\n"
+        "-- Câu hỏi: So với tháng liền trước, doanh thu tháng 6 năm 2026 thay đổi bao nhiêu %?\n"
+        "-- Lưu ý: Tháng liền trước của T6/2026 là cả tháng 5/2026 (M-1). Tuyệt đối KHÔNG so với tháng 6/2025 (cùng kỳ năm trước):\n"
+        "WITH monthly AS (\n"
+        "  SELECT SUBSTR(\"Thời gian\", 1, 7) AS ym, SUM(\"revenue_norm\") AS rev\n"
+        "  FROM ban_hang\n"
+        "  WHERE \"status_norm\" = 'Hoàn thành' AND SUBSTR(\"Thời gian\", 1, 7) IN ('2026-05', '2026-06')\n"
+        "  GROUP BY ym\n"
+        ")\n"
+        "SELECT ROUND((curr.rev - prev.rev) * 100.0 / NULLIF(prev.rev, 0), 2) AS answer\n"
+        "FROM (SELECT rev FROM monthly WHERE ym = '2026-06') curr,\n"
+        "     (SELECT rev FROM monthly WHERE ym = '2026-05') prev;"
+    )
+
+    EXEMPLAR_GROWTH_SAME_PERIOD_MONTH = (
+        "/* Ví dụ DAIL-O 3: So sánh doanh thu với cùng kỳ tháng trước (%) */\n"
+        "-- Câu hỏi: Từ đầu tháng này đến hết hôm nay (15/07/2026), doanh thu thay đổi bao nhiêu % so với cùng kỳ tháng trước?\n"
+        "-- Lưu ý: Cùng kỳ tháng trước là từ ngày 01 đến cùng ngày D của tháng trước (01/06/2026 đến 15/06/2026):\n"
+        "WITH p AS (\n"
+        "  SELECT \n"
+        "    SUM(CASE WHEN \"Thời gian\" >= '2026-07-01' AND \"Thời gian\" <= '2026-07-15 23:59:59' THEN \"revenue_norm\" ELSE 0 END) AS curr_rev,\n"
+        "    SUM(CASE WHEN \"Thời gian\" >= '2026-06-01' AND \"Thời gian\" <= '2026-06-15 23:59:59' THEN \"revenue_norm\" ELSE 0 END) AS prev_rev\n"
+        "  FROM ban_hang\n"
+        "  WHERE \"status_norm\" = 'Hoàn thành'\n"
+        ")\n"
+        "SELECT ROUND((curr_rev - prev_rev) * 100.0 / NULLIF(prev_rev, 0), 2) AS answer FROM p;"
+    )
+
+    EXEMPLAR_GROWTH_SAME_PERIOD_YEAR = (
+        "/* Ví dụ DAIL-O 4: So sánh doanh thu với cùng kỳ năm trước (%) */\n"
+        "-- Câu hỏi: Doanh thu tháng 5/2026 tăng trưởng bao nhiêu % so với cùng kỳ năm trước (tháng 5/2025)?\n"
+        "-- Lưu ý: So cùng kỳ năm trước là so với cùng tháng M của năm Y-1:\n"
+        "WITH monthly AS (\n"
+        "  SELECT SUBSTR(\"Thời gian\", 1, 7) AS ym, SUM(\"revenue_norm\") AS rev\n"
+        "  FROM ban_hang\n"
+        "  WHERE \"status_norm\" = 'Hoàn thành' AND SUBSTR(\"Thời gian\", 1, 7) IN ('2025-05', '2026-05')\n"
+        "  GROUP BY ym\n"
+        ")\n"
+        "SELECT ROUND((curr.rev - prev.rev) * 100.0 / NULLIF(prev.rev, 0), 2) AS answer\n"
+        "FROM (SELECT rev FROM monthly WHERE ym = '2026-05') curr,\n"
+        "     (SELECT rev FROM monthly WHERE ym = '2025-05') prev;"
+    )
+
+    EXEMPLAR_TOP_ITEMS_QTY_BASE = (
+        "/* Ví dụ DAIL-O 5: Tìm mặt hàng bán chạy nhất */\n"
+        "-- Câu hỏi: Hàng nào bán chạy nhất tháng 1/2025?\n"
+        "-- Lưu ý: BẮT BUỘC ORDER BY SUM(\"qty_base\") DESC (theo số lượng quy đổi ra đơn vị cơ bản lẻ nhỏ nhất). Không order by số lượng thô:\n"
+        "SELECT \"Tên hàng\" AS answer\n"
+        "FROM ban_hang\n"
+        "WHERE \"status_norm\" = 'Hoàn thành'\n"
+        "  AND \"Thời gian\" >= '2025-01-01' AND \"Thời gian\" < '2025-02-01'\n"
+        "GROUP BY \"Tên hàng\"\n"
+        "ORDER BY SUM(COALESCE(\"qty_base\", \"Số lượng\")) DESC\n"
+        "LIMIT 1;"
+    )
+
+    EXEMPLAR_SINGLE_ITEM_QUERY = (
+        "/* Ví dụ DAIL-O 6: Doanh thu của một món ăn / mặt hàng cụ thể */\n"
+        "-- Câu hỏi: Xem giúp tiền bán cơm chiên dương châu tháng 3/2025 là bao nhiêu?\n"
+        "-- Lưu ý: BẮT BUỘC lọc đúng tên món trong mệnh đề WHERE (ILIKE). Tuyệt đối KHÔNG tính tổng cả tháng của toàn cửa hàng:\n"
+        "SELECT COALESCE(SUM(\"revenue_norm\"), 0) AS answer\n"
+        "FROM ban_hang\n"
+        "WHERE \"status_norm\" = 'Hoàn thành'\n"
+        "  AND \"Thời gian\" >= '2025-03-01' AND \"Thời gian\" < '2025-04-01'\n"
+        "  AND \"Tên hàng\" ILIKE '%cơm chiên dương châu%';"
+    )
+
+    EXEMPLAR_CUSTOMER_DEBT = (
+        "/* Ví dụ DAIL-O 7: Bảng khách hàng có công nợ lớn nhất */\n"
+        "-- Câu hỏi: Top 3 khách có công nợ lớn nhất đến hết ngày 14/09/2026?\n"
+        "-- Lưu ý: Bắt buộc loại trừ 'Khách lẻ' / 'khách vãng lai' và các dòng nợ <= 0:\n"
+        "SELECT \"Tên khách\" AS khach_hang, SUM(\"Nợ\") AS so_tien_no\n"
+        "FROM cong_no\n"
+        "WHERE \"Thời gian\" <= '2026-09-14 23:59:59'\n"
+        "  AND \"Tên khách\" NOT ILIKE '%khách lẻ%' AND \"Tên khách\" NOT ILIKE '%lẻ%' AND \"Tên khách\" IS NOT NULL\n"
+        "GROUP BY \"Tên khách\"\n"
+        "HAVING SUM(\"Nợ\") > 0\n"
+        "ORDER BY so_tien_no DESC\n"
+        "LIMIT 3;"
+    )
+
+    EXEMPLAR_SHIFT_COMPARISON = (
+        "/* Ví dụ DAIL-O 8: So sánh ca chiều với ca sáng (%) */\n"
+        "-- Câu hỏi: Tháng 12/2025 doanh thu ca chiều tăng hay giảm bao nhiêu % so với ca sáng?\n"
+        "-- Lưu ý: Ca sáng: 06:00-13:59:59; Ca chiều: 14:00-21:59:59. Mẫu số so sánh là Ca sáng:\n"
+        "WITH shifts AS (\n"
+        "  SELECT \n"
+        "    SUM(CASE WHEN CAST(strftime(try_strptime(\"Thời gian\", '%Y-%m-%d %H:%M:%S'), '%H') AS INT) BETWEEN 6 AND 13 THEN \"revenue_norm\" ELSE 0 END) AS sang,\n"
+        "    SUM(CASE WHEN CAST(strftime(try_strptime(\"Thời gian\", '%Y-%m-%d %H:%M:%S'), '%H') AS INT) BETWEEN 14 AND 21 THEN \"revenue_norm\" ELSE 0 END) AS chieu\n"
+        "  FROM ban_hang\n"
+        "  WHERE \"status_norm\" = 'Hoàn thành'\n"
+        "    AND \"Thời gian\" >= '2025-12-01' AND \"Thời gian\" < '2026-01-01'\n"
+        ")\n"
+        "SELECT ROUND((chieu - sang) * 100.0 / NULLIF(sang, 0), 2) AS answer FROM shifts;"
+    )
+
+    @classmethod
+    def select_exemplars(cls, question: str, has_entity_hint: bool = False) -> str:
+        """
+        DAIL-S: Tự động trích xuất 1-2 ví dụ có khung xương (Skeleton) tương đồng nhất theo intent của câu hỏi.
+        """
+        q = strip_accents(question).lower().strip()
+        selected: List[str] = []
+
+        # Intent 1: Tỉ lệ đơn hủy
+        if any(kw in q for kw in ["ti le huy", "ti le don huy", "% don bi huy", "% don huy", "don bi huy"]):
+            selected.append(cls.EXEMPLAR_CANCEL_RATE)
+
+        # Intent 2: So sánh cùng kỳ tháng trước
+        if any(kw in q for kw in ["cung ky thang truoc", "cung ky th truoc", "cung ky thang trc", "cung ky th trc"]):
+            selected.append(cls.EXEMPLAR_GROWTH_SAME_PERIOD_MONTH)
+
+        # Intent 3: So sánh tháng liền trước (không phải cùng kỳ)
+        elif any(kw in q for kw in ["thang lien truoc", "thang truoc do", "hon hay kem thang truoc", "hon hay kem thang trc", "so voi thang truoc", "so voi thang trc"]):
+            selected.append(cls.EXEMPLAR_GROWTH_PREV_MONTH)
+
+        # Intent 4: So sánh cùng kỳ năm trước
+        elif any(kw in q for kw in ["cung ky nam truoc", "cung ky nam ngoai", "so voi cung ky nam truoc"]):
+            selected.append(cls.EXEMPLAR_GROWTH_SAME_PERIOD_YEAR)
+
+        # Intent 5: So sánh ca chiều với ca sáng
+        if any(kw in q for kw in ["ca chieu", "ca sang"]) and any(kw in q for kw in ["so voi", "so vs", "chenh", "tang hay giam"]):
+            selected.append(cls.EXEMPLAR_SHIFT_COMPARISON)
+
+        # Intent 6: Top bán chạy / chạy nhất
+        if any(kw in q for kw in ["chay nhat", "hot nhat", "ban nhieu nhat", "ban chay nhat", "top 3 sp", "top 5 sp", "top 5 hang"]):
+            selected.append(cls.EXEMPLAR_TOP_ITEMS_QTY_BASE)
+
+        # Intent 7: Hỏi về 1 món ăn / sản phẩm cụ thể
+        if has_entity_hint and not any(kw in q for kw in ["chay nhat", "hot nhat", "ban nhieu nhat"]):
+            selected.append(cls.EXEMPLAR_SINGLE_ITEM_QUERY)
+
+        # Intent 8: Công nợ khách hàng
+        if any(kw in q for kw in ["cong no", "con no", "no nhieu nhat"]):
+            selected.append(cls.EXEMPLAR_CUSTOMER_DEBT)
+
+        # Giới hạn tối đa 2 ví dụ để đảm bảo token efficiency theo DAIL-O
+        chosen = selected[:2]
+        if not chosen:
+            # Fallback ví dụ doanh thu thuần cơ bản
+            return ""
+
+        formatted_block = (
+            "=== VÍ DỤ MINH HỌA TRUY VẤN DUCKDB SQL CHUẨN (DAIL-O FEW-SHOT) ===\n"
+            + "\n\n".join(chosen)
+            + "\n"
+        )
+        return formatted_block
+

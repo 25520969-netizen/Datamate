@@ -726,8 +726,10 @@ class BusinessDataStore:
     def _enrich_table_synonyms_and_id(tables: Dict[str, pd.DataFrame], business_id: str) -> Dict[str, pd.DataFrame]:
         """Bổ sung cột business_id và các alias cột phổ biến cho mọi bảng để chống Binder Error trong DuckDB/Pandas."""
         for tbl_name, df in tables.items():
+            synthetic = set()
             if "business_id" not in df.columns:
                 df["business_id"] = business_id
+                synthetic.add("business_id")
 
             # 1. Khách hàng (Tên)
             cust_name_syns = ["Khách hàng", "Tên KH", "Tên khách hàng", "Tên khách", "Khách hàng (tên)", "TenKH", "KH"]
@@ -736,22 +738,25 @@ class BusinessDataStore:
                 for target in ["Khách hàng", "Tên KH", "Tên khách hàng", "Tên khách"]:
                     if target not in df.columns:
                         df[target] = df[found_cust_name]
+                        synthetic.add(target)
 
             # 2. Mã khách hàng
-            cust_id_syns = ["Mã KH", "Mã khách hàng", "Mã khách", "MaKH", "ma_kh", "Customer ID", "Mã khách mua"]
+            cust_id_syns = ["Mã KH", "Mã khách hàng", "Mã khách", "MaKH", "ma_kh", "Customer ID", "Mã khách mua", "MaKhachHang"]
             found_cust_id = next((c for c in cust_id_syns if c in df.columns), None)
             if found_cust_id:
                 for target in ["Mã KH", "Mã khách hàng", "Mã khách"]:
                     if target not in df.columns:
                         df[target] = df[found_cust_id]
+                        synthetic.add(target)
 
             # 3. Mã đơn hàng / Chứng từ
-            order_syns = ["Mã đơn hàng", "Mã hóa đơn", "Mã chứng từ", "Số chứng từ", "SoCT", "Số HĐ", "Mã GD", "Mã đơn", "Ma don", "Số phiếu", "Mã giao dịch"]
+            order_syns = ["Mã đơn hàng", "Mã hóa đơn", "Mã chứng từ", "Số chứng từ", "SoCT", "Số HĐ", "Mã GD", "Mã đơn", "Ma don", "Số phiếu", "Mã giao dịch", "MaHoaDon", "MaDonHang"]
             found_order = next((c for c in order_syns if c in df.columns), None)
             if found_order:
                 for target in ["Mã đơn hàng", "Mã hóa đơn", "Mã chứng từ", "Mã đơn"]:
                     if target not in df.columns:
                         df[target] = df[found_order]
+                        synthetic.add(target)
 
             # 4. Tên sản phẩm / Hàng hóa
             prod_name_syns = ["Tên sản phẩm", "Tên hàng", "Tên hàng hóa", "Mặt hàng", "Tên mặt hàng", "Tên SP", "Sản phẩm", "ten_hang"]
@@ -760,6 +765,7 @@ class BusinessDataStore:
                 for target in ["Tên sản phẩm", "Tên hàng", "Tên hàng hóa", "Tên SP", "Sản phẩm"]:
                     if target not in df.columns:
                         df[target] = df[found_prod_name]
+                        synthetic.add(target)
 
             # 5. Mã sản phẩm / SKU
             prod_id_syns = ["Mã sản phẩm", "Mã hàng", "Mã hàng hóa", "MaHangHoa", "MaHH", "Mã SP", "Mã SKU", "SKU", "ID SP", "Mã hàng bán"]
@@ -768,6 +774,7 @@ class BusinessDataStore:
                 for target in ["Mã sản phẩm", "Mã hàng", "Mã hàng hóa", "Mã SKU"]:
                     if target not in df.columns:
                         df[target] = df[found_prod_id]
+                        synthetic.add(target)
 
             # 6. Ngày / Thời gian
             date_syns = ["Ngày", "Thời gian", "Ngay", "NgayLap", "Ngày tạo", "Ngày đặt hàng", "Ngày bán", "Ngày lập", "Ngày mua", "NgayBan", "Thời điểm", "Date"]
@@ -776,6 +783,7 @@ class BusinessDataStore:
                 for target in ["Ngày", "Thời gian", "NgàyLap"]:
                     if target not in df.columns:
                         df[target] = df[found_date]
+                        synthetic.add(target)
 
             # 7. Trạng thái đơn hàng
             status_syns = ["Trạng thái", "status_norm", "TinhTrang", "Tình trạng", "TrangThai", "Tình trạng đơn", "Trạng thái đơn hàng", "Trạng thái xử lý", "Xử lý"]
@@ -784,6 +792,7 @@ class BusinessDataStore:
                 for target in ["Trạng thái", "status_norm", "Tình trạng"]:
                     if target not in df.columns:
                         df[target] = df[found_status]
+                        synthetic.add(target)
 
             # 8. Doanh thu / Thành tiền / Tổng tiền
             revenue_syns = ["Thành tiền", "revenue_norm", "Tổng tiền", "ThanhTien", "TongTien", "Tiền bán", "Tổng bill", "Tổng đơn", "Trị giá", "Giá trị"]
@@ -792,6 +801,7 @@ class BusinessDataStore:
                 for target in ["Thành tiền", "revenue_norm", "Tổng tiền"]:
                     if target not in df.columns:
                         df[target] = df[found_rev]
+                        synthetic.add(target)
 
             # 9. Nhóm hàng / Danh mục / Loại sản phẩm
             cat_syns = ["Nhóm hàng", "Nhóm", "Nhóm hàng hóa", "Danh mục", "Nhom hang", "Loại sản phẩm", "Loại hàng hóa", "Loại hàng", "Nhóm hàng(3 Cấp)"]
@@ -800,6 +810,7 @@ class BusinessDataStore:
                 for target in ["Nhóm hàng", "Nhóm", "Nhóm hàng hóa", "Danh mục", "Loại sản phẩm"]:
                     if target not in df.columns:
                         df[target] = df[found_cat]
+                        synthetic.add(target)
 
             # 10. Hạn sử dụng (HSD)
             hsd_syns = ["Hạn sử dụng", "HSD", "HanSuDung", "Hạn dùng"]
@@ -808,6 +819,13 @@ class BusinessDataStore:
                 for target in ["Hạn sử dụng", "HSD"]:
                     if target not in df.columns:
                         df[target] = df[found_hsd]
+                        synthetic.add(target)
+
+            existing_syn = df.attrs.get("synthetic_aliases", set())
+            if isinstance(existing_syn, set):
+                df.attrs["synthetic_aliases"] = existing_syn.union(synthetic)
+            else:
+                df.attrs["synthetic_aliases"] = synthetic
 
         return tables
 
@@ -1512,7 +1530,13 @@ class BusinessDataStore:
         for tbl_name, df in tables.items():
             if tbl_name in part_names_to_hide:
                 continue
-            cols_key = tuple(c for c in df.columns if c != "_sheet_name")
+            synthetic = df.attrs.get("synthetic_aliases", set())
+            # Giữ lại các cột thực tế và cột chuẩn hóa cốt lõi (status_norm, qty_base)
+            # Ẩn bớt các alias tổng hợp nhân bản trong Schema Prompt để tránh vượt ngưỡng 8192 token gây lỗi 400 Bad Request
+            cols_key = tuple(
+                c for c in df.columns
+                if c != "_sheet_name" and (c not in synthetic or c in {"status_norm", "qty_base"})
+            )
             by_cols.setdefault(cols_key, []).append((tbl_name, df))
 
         for cols_key, grp in by_cols.items():

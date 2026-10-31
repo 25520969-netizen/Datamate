@@ -553,7 +553,7 @@ class RuleEngine:
         # Mục 1 (Đơn hàng & doanh thu) luôn quan trọng cho hầu hết truy vấn
         selected_keys.append("1. Đơn hàng và doanh thu")
 
-        # Mục 3: Xếp hạng / khách hàng / bán chạy / trung bình đơn
+        # Mục 3: Xếp hạng / bán chạy / trung bình đơn / top khách hàng
         if any(
             kw in q
             for kw in [
@@ -566,12 +566,15 @@ class RuleEngine:
                 "lời nhất",
                 "xếp hạng",
                 "top",
-                "khách",
                 "nhân viên",
                 "trung bình",
                 "bình quân",
                 "nhóm hàng",
                 "phí phục vụ",
+                "top khách",
+                "khách mua nhiều",
+                "khách quen",
+                "hạng khách",
             ]
         ) or "phí phục vụ" in readme_lower:
             selected_keys.append("3. Xếp hạng")
@@ -604,7 +607,7 @@ class RuleEngine:
                 "hộp",
                 "lốc",
             ]
-        ) or bool(re.search(r"\b(?:lời|tiền lời|sinh lời|có lời|hàng ế|tồn ế)\b", q))
+        ) or bool(re.search(r"(?<!trả\s)(?<!hãy\s)\b(?:lời|tiền lời|sinh lời|có lời|hàng ế|tồn ế)\b", q))
         if has_sec5:
             selected_keys.append("5. Kho, nhập hàng, giá vốn")
 
@@ -613,8 +616,11 @@ class RuleEngine:
         for ind_key in industry_sections:
             ind_name = ind_key.replace("6. Theo ngành - ", "").strip()
             ind_clean = strip_accents(ind_name)
-            # 1. So khớp tên ngành trực tiếp trong README hoặc câu hỏi
-            if ind_name.lower() in readme_lower or ind_clean in strip_accents(biz_readme) or ind_name.lower() in q:
+            # 1. So khớp tên ngành trực tiếp trong câu hỏi hoặc README
+            if ind_name.lower() in q:
+                selected_keys.append(ind_key)
+                continue
+            if ind_name.lower() in readme_lower or ind_clean in strip_accents(biz_readme):
                 selected_keys.append(ind_key)
                 continue
             # 2. Hoặc so khớp từ khóa đặc trưng trong nội dung tiểu mục luật ngành đó
@@ -636,18 +642,39 @@ class RuleEngine:
         )
 
         seen = set()
-        blocks: List[str] = []
+        scored_blocks: List[Tuple[int, str]] = []
         for k in selected_keys:
             if k in seen:
                 continue
             seen.add(k)
             for sec_title, sec_body in self.sections.items():
                 if sec_title == k or sec_title.startswith(k):
-                    blocks.append(sec_body)
+                    prio = 10
+                    k_low = k.lower()
+                    if "4. công nợ" in k_low and any(w in q for w in ["nợ", "công nợ"]):
+                        prio = 50
+                    elif "5. kho" in k_low and any(w in q for w in ["tồn", "kho", "nhập"]):
+                        prio = 40
+                    elif "3. xếp hạng" in k_low and any(w in q for w in ["top", "chạy nhất", "nhiều nhất", "xếp hạng"]):
+                        prio = 30
+                    elif "1. đơn hàng" in k_low:
+                        prio = 20
+                    elif k_low.startswith("6. theo ngành") and any(w in q for w in ["thuốc", "vật liệu", "bàn", "món", "ly"]):
+                        prio = 35
+                    scored_blocks.append((prio, sec_body))
                     break
 
-        blocks.append(compact_footer)
-        return "\n\n".join(blocks)
+        # Giới hạn trần rules_prompt <= 2500 ký tự (ưu tiên section có điểm liên quan trực tiếp cao nhất)
+        scored_blocks.sort(key=lambda x: x[0], reverse=True)
+        kept_blocks: List[str] = []
+        c_len = 0
+        for _, body in scored_blocks:
+            if c_len + len(body) <= 2500 or not kept_blocks:
+                kept_blocks.append(body)
+                c_len += len(body)
+
+        kept_blocks.append(compact_footer)
+        return "\n\n".join(kept_blocks)
 
     @staticmethod
     def extract_readme_max_date(biz_readme: str) -> Optional[date]:

@@ -76,15 +76,17 @@ Nhiệm vụ: Viết một đoạn mã Python sử dụng kết nối DuckDB `co
 QUY TẮC CỐT LÕI (DEFENSIVE CTE DUCKDB RELATIONAL):
 1. Tổ chức truy vấn kiểm soát dữ liệu chặt chẽ:
    - CTE 1 (valid_orders): Lọc đơn hàng hợp lệ theo ngày và loại bỏ đơn 'Đã hủy', 'Trả hàng' (CHÚ Ý: nếu tính tỉ lệ hủy đơn thì giữ lại đơn hủy để đếm). BẮT BUỘC dùng `SELECT * FROM ... WHERE ...` để giữ lại toàn bộ các cột phục vụ cho các bước JOIN và GROUP BY phía sau, tuyệt đối không liệt kê thiếu cột gây lỗi Binder Error.
-   - CTE 2 (filtered_data): Ghép nối với bảng chi tiết hoặc bảng danh mục theo khóa ngoại (`Mã đơn hàng`, `Mã sản phẩm`). Khi JOIN, luôn dùng alias rõ ràng: o."Khách hàng", c."Khách hàng" để tránh lỗi DuckDB Ambiguous reference.
+   - CTE 2 (filtered_data): Nếu câu hỏi cần thêm thông tin từ bảng thứ hai (chi tiết hàng hoặc danh mục), ghép nối theo khóa ngoại (`Mã đơn hàng`, `Mã sản phẩm`). TUYỆT ĐỐI KHÔNG tự ý JOIN bảng với chính nó hoặc JOIN thừa thãi khi câu hỏi chỉ cần dữ liệu từ 1 bảng duy nhất (như bảng bán hàng hoặc bảng hóa đơn), vì JOIN thừa sẽ nhân bản dòng dữ liệu (Cartesian product) làm sai lệch nghiêm trọng kết quả tính toán!
    - CTE 3 (aggregated): Nhóm và tính toán tổng tiền, số lượng (`qty_base`), hoặc tỉ trọng.
-   - Hoàn toàn có thể viết trực tiếp câu lệnh SELECT duy nhất nếu truy vấn đơn giản, không bắt buộc phải tách nhiều CTE.
+   - Hoàn toàn có thể viết trực tiếp câu lệnh SELECT duy nhất nếu truy vấn đơn giản hoặc đơn bảng, không bắt buộc phải tách nhiều CTE.
 2. Quy tắc an toàn bắt buộc:
    - Dữ liệu đã nạp sẵn trong kết nối `con` (DuckDB) và `tables` (Pandas), TUYỆT ĐỐI KHÔNG gọi `duckdb.connect(...)` hoặc mở file mới.
    - Tuyệt đối KHÔNG viết comment (# ...) trong code Python, chỉ viết trực tiếp các lệnh thực thi.
    - Luôn bọc `COALESCE(SUM(...), 0)` ở các hàm tổng hợp để tránh trả về NULL; trong Python: `row = con.execute(query).fetchone(); val = row[0] if row else 0; result = {"type": "number", "answer": float(val) if val is not None else 0.0}`.
    - Tên bảng và tên cột tiếng Việt có dấu, khoảng trắng BẮT BUỘC bọc trong ngoặc kép: `"Thành tiền"`, `"Mã đơn hàng"`, `"Ngày"`, `"Trạng thái"`.
-   - Lọc ngày: `WHERE CAST("Ngày" AS DATE) BETWEEN DATE 'start' AND DATE 'end'`.
+   - Lọc ngày theo khoảng thời gian: `WHERE CAST("Ngày" AS DATE) BETWEEN DATE 'start' AND DATE 'end'`.
+   - Lọc lũy kế ("tính đến ngày X", "tính đến hết ngày X", "còn nợ", "còn tồn"): Lấy toàn bộ giao dịch phát sinh từ đầu dữ liệu đến hết ngày X: `WHERE CAST("Ngày" AS DATE) <= DATE 'X'` (hoặc `WHERE "Ngày" <= 'YYYY-MM-DD 23:59:59'`), TUYỆT ĐỐI KHÔNG lọc gói gọn trong riêng ngày X (`BETWEEN X AND X`).
+   - Công nợ khách hàng (còn nợ, nợ nhiều nhất): Tính `SUM(COALESCE("Tổng tiền hàng", "Tổng bill", "Thành tiền", 0)) - SUM(COALESCE("Khách đã trả", "Khách trả", 0))` hoặc cột nợ phát sinh, KHÔNG lấy tổng doanh thu làm công nợ.
    - Doanh thu (revenue): Luôn là `SUM(COALESCE("revenue_norm", "Thành tiền"))`.
    - Sản phẩm bán chạy nhất: Luôn xếp theo `SUM(COALESCE("qty_base", "Số lượng")) DESC` (sản lượng bán ra), KHÔNG xếp theo doanh thu.
    - Tránh chia cho 0: Luôn dùng `NULLIF(..., 0)` ở mẫu số để tránh lỗi crash division by zero.
@@ -245,6 +247,13 @@ class QwenCoderClient:
                                     resp = self._session.post(url, json=payload, headers=headers, timeout=self.request_timeout)
                         except Exception:
                             pass
+                    if resp.status_code >= 400:
+                        try:
+                            err_body = resp.json()
+                            err_msg = err_body.get("message") or err_body.get("error", {}).get("message") or resp.text
+                        except Exception:
+                            err_msg = resp.text
+                        raise RuntimeError(f"HTTP {resp.status_code} from {url}: {err_msg}")
                     resp.raise_for_status()
                     data = resp.json()
                     return data["choices"][0]["message"]["content"]

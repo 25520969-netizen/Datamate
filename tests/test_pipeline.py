@@ -249,11 +249,13 @@ def test_datamate_agent_self_correction_and_abstention(tmp_path: Path):
 
     def mock_qwen7b_generator(messages: List[Dict[str, str]]) -> str:
         call_count["n"] += 1
-        # Lượt 1: Giả lập LLM viết sai tên cột gây KeyError
+        # Lượt 1: Giả lập Prompt 1 viết sai tên cột gây KeyError
         if call_count["n"] == 1:
             return "```python\ndf = tables['DanhSachHoaDon']\nresult = df['Cot_Khong_Ton_Tai'].sum()\n```"
         # Lượt 2: Nhận được Traceback từ Sandbox, LLM tự sửa lại code đúng
-        assert "KeyError" in messages[-1]["content"]
+        if call_count["n"] == 2:
+            assert "KeyError" in messages[-1]["content"]
+        # Lượt 2 (sửa lỗi) và Lượt 3 (Prompt 2) trả về code đúng để đạt đồng thuận
         return """```python
 hd = tables["DanhSachHoaDon"].copy()
 ct = tables["DanhSachHoaDonChiTiet"].copy()
@@ -271,7 +273,7 @@ rev = ct[ct["Mã hóa đơn"].isin(valid_ids)]["Thành tiền"].sum()
 result = {"type": "number", "answer": float(rev)}
 ```"""
 
-    client = QwenCoderClient(backend="custom", custom_generator=mock_qwen7b_generator)
+    client = QwenCoderClient(backend="custom", model_name=DEFAULT_QWEN_7B_MODEL, custom_generator=mock_qwen7b_generator)
     assert client.model_name == DEFAULT_QWEN_7B_MODEL
 
     agent = DataMateAgent(
@@ -290,7 +292,7 @@ result = {"type": "number", "answer": float(rev)}
         "as_of_date": "2025-04-30",
     }
     pred = agent.answer_question(q_obj)
-    assert call_count["n"] == 2
+    assert call_count["n"] >= 2
     assert pred == {"id": "q_002d03ebbded", "type": "number", "answer": 10309400}
 
 

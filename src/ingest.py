@@ -1075,152 +1075,101 @@ class BusinessDataStore:
                 mask_ret = df[ord_col].astype(str).isin(returned_order_ids) & (df[st_col] != "Đã hủy")
                 if mask_ret.any():
                     df.loc[mask_ret, st_col] = "Trả hàng"
+                    if "Trạng thái" in df.columns:
+                        df.loc[mask_ret, "Trạng thái"] = "Trả hàng"
+                    if "status_norm" in df.columns:
+                        df.loc[mask_ret, "status_norm"] = "Trả hàng"
 
-        # 3. Bổ sung (denormalize) các cột khóa ngoại phổ biến vào bảng chi tiết để hỗ trợ truy vấn 1 bảng
-        # 3a. DanhSachNhapHang + DanhSachChiTietNhapHang (+ DanhSachSanPham)
-        if "DanhSachChiTietNhapHang" in tables and "DanhSachNhapHang" in tables:
-            nh = tables["DanhSachNhapHang"]
-            ct_nh = tables["DanhSachChiTietNhapHang"]
-            if "Mã nhập hàng" in nh.columns and "Mã nhập hàng" in ct_nh.columns:
-                nh_dedup = nh.drop_duplicates(subset=["Mã nhập hàng"])
-                for col_to_copy in ("Thời gian", "Trạng thái", "Mã NCC", "Ghi chú"):
-                    if col_to_copy in nh_dedup.columns and col_to_copy not in ct_nh.columns:
-                        mapper = nh_dedup.set_index("Mã nhập hàng")[col_to_copy]
-                        ct_nh[col_to_copy] = ct_nh["Mã nhập hàng"].map(mapper)
-                if "Thời gian" in ct_nh.columns and "Ngày nhập" not in ct_nh.columns:
-                    ct_nh["Ngày nhập"] = ct_nh["Thời gian"]
-            if "DanhSachSanPham" in tables and "Mã hàng" in ct_nh.columns and "Tên hàng" not in ct_nh.columns:
-                sp = tables["DanhSachSanPham"]
-                if "Mã hàng" in sp.columns and "Tên hàng" in sp.columns:
-                    sp_mapper = sp.drop_duplicates(subset=["Mã hàng"]).set_index("Mã hàng")["Tên hàng"]
-                    ct_nh["Tên hàng"] = ct_nh["Mã hàng"].map(sp_mapper)
-            if "Thành tiền" not in ct_nh.columns and "Số lượng" in ct_nh.columns and "Đơn giá" in ct_nh.columns:
-                if pd.api.types.is_numeric_dtype(ct_nh["Số lượng"]) and pd.api.types.is_numeric_dtype(ct_nh["Đơn giá"]):
-                    ct_nh["Thành tiền"] = ct_nh["Số lượng"] * ct_nh["Đơn giá"]
-            if "Đơn giá" in ct_nh.columns and "Giá nhập" not in ct_nh.columns:
-                ct_nh["Giá nhập"] = ct_nh["Đơn giá"]
+        # 3. Tự động liên kết khóa ngoại tổng quát (Generic Foreign Key & Catalog Denormalizer)
+        # Hoàn toàn tự động dựa trên giao điểm khóa ngoại, KHÔNG hardcode tên bảng của shop cụ thể.
+        all_order_id_set = set(all_order_id_cols) | {
+            "Order ID", "MaDon", "ma_don", "Mã chứng từ", "MaHoaDon", "Mã đơn hàng", "Số phiếu", "Mã giao dịch", "Số CT", "Mã hóa đơn"
+        }
 
-        # 3b. DanhSachHoaDon + DanhSachHoaDonChiTiet (+ DanhSachSanPham)
-        if "DanhSachHoaDon" in tables:
-            hd = tables["DanhSachHoaDon"]
-            if "Tổng tiền hàng" in hd.columns and "Thành tiền" not in hd.columns:
-                hd["Thành tiền"] = hd["Tổng tiền hàng"]
-            if "Mã hóa đơn" in hd.columns:
-                hd_dedup = hd.drop_duplicates(subset=["Mã hóa đơn"])
-                for ct_name in [k for k in tables if k.startswith("DanhSachHoaDonChiTiet") and k != "DanhSachHoaDonChiTietLo"]:
-                    ct_hd = tables[ct_name]
-                    if "Mã hóa đơn" in ct_hd.columns:
-                        for col_to_copy in ("Thời gian", "Trạng thái", "status_norm", "Mã KH", "Khách hàng", "Kênh bán", "Phương thức thanh toán", "Người bán"):
-                            if col_to_copy in hd_dedup.columns and col_to_copy not in ct_hd.columns:
-                                mapper = hd_dedup.set_index("Mã hóa đơn")[col_to_copy]
-                                ct_hd[col_to_copy] = ct_hd["Mã hóa đơn"].map(mapper)
+        # 3a. Liên kết Bảng cấp Đơn (Header) -> Bảng chi tiết dòng (Detail) qua Mã đơn / Mã phiếu
+        for parent_name, df_parent in list(tables.items()):
+            parent_id_col = next((c for c in df_parent.columns if c in all_order_id_set), None)
+            if not parent_id_col:
+                continue
 
-        # 3c. BanHang_HoaDon + BanHang_ChiTietHoaDon + BanHang_Thuoc + BanHang_HangHoa (biz_124)
-        if "BanHang_HoaDon" in tables and "BanHang_ChiTietHoaDon" in tables:
-            hd_bh = tables["BanHang_HoaDon"]
-            ct_bh = tables["BanHang_ChiTietHoaDon"]
-            if "Order ID" in hd_bh.columns and "Mã giao dịch" in ct_bh.columns:
-                hd_bh_dedup = hd_bh.drop_duplicates(subset=["Order ID"])
-                for col_to_copy in ("Ngày bán", "Trạng thái", "Mã KH mua", "Tên KH", "Mã NV bán", "Phương thức TT", "Nguồn đơn"):
-                    if col_to_copy in hd_bh_dedup.columns and col_to_copy not in ct_bh.columns:
-                        mapper = hd_bh_dedup.set_index("Order ID")[col_to_copy]
-                        ct_bh[col_to_copy] = ct_bh["Mã giao dịch"].map(mapper)
-        if "BanHang_Thuoc" in tables:
-            th_bh = tables["BanHang_Thuoc"]
-            if "Mã HH" in th_bh.columns:
-                th_dedup = th_bh.drop_duplicates(subset=["Mã HH"]).set_index("Mã HH")
-                if "BanHang_HangHoa" in tables and "ma_sp" in tables["BanHang_HangHoa"].columns:
-                    hh = tables["BanHang_HangHoa"]
-                    if "Món" in hh.columns and "Món" not in th_bh.columns:
-                        th_bh["Món"] = th_bh["Mã HH"].map(hh.drop_duplicates(subset=["ma_sp"]).set_index("ma_sp")["Món"])
-                    for col_to_copy in ("Hoạt chất", "Kê đơn"):
-                        if col_to_copy in th_dedup.columns and col_to_copy not in hh.columns:
-                            hh[col_to_copy] = hh["ma_sp"].map(th_dedup[col_to_copy])
-                if "BanHang_ChiTietHoaDon" in tables and "Ma hang" in tables["BanHang_ChiTietHoaDon"].columns:
-                    ct_bh = tables["BanHang_ChiTietHoaDon"]
-                    for col_to_copy in ("Hoạt chất", "Kê đơn"):
-                        if col_to_copy in th_dedup.columns and col_to_copy not in ct_bh.columns:
-                            ct_bh[col_to_copy] = ct_bh["Ma hang"].map(th_dedup[col_to_copy])
+            parent_dedup = df_parent.drop_duplicates(subset=[parent_id_col]).set_index(parent_id_col)
+            cols_to_share = [
+                c for c in (
+                    "Thời gian", "Ngày", "Trạng thái", "status_norm", "Mã KH", "Khách hàng", "Tên KH",
+                    "Kênh bán", "Phương thức thanh toán", "Phương thức TT", "Người bán", "Ghi chú"
+                )
+                if c in parent_dedup.columns
+            ]
+            if not cols_to_share:
+                continue
 
-        # 3d. DanhSachSanPham + DanhSachThuoc + DonHang_ChiTiet / DanhSachHoaDonChiTiet (biz_119, biz_120, biz_121, biz_122)
-        if "DanhSachThuoc" in tables and "DanhSachSanPham" in tables:
-            th_ds = tables["DanhSachThuoc"]
-            sp_ds = tables["DanhSachSanPham"]
-            sku_col = "Mã SKU" if "Mã SKU" in th_ds.columns else ("Mã hàng" if "Mã hàng" in th_ds.columns else None)
-            pname_col = "Tên sản phẩm" if "Tên sản phẩm" in sp_ds.columns else ("Tên hàng" if "Tên hàng" in sp_ds.columns else None)
-            if sku_col and sku_col in sp_ds.columns and pname_col:
-                sp_by_sku = sp_ds.drop_duplicates(subset=[sku_col]).set_index(sku_col)
-                if pname_col not in th_ds.columns:
-                    th_ds[pname_col] = th_ds[sku_col].map(sp_by_sku[pname_col])
-                th_by_sku = th_ds.drop_duplicates(subset=[sku_col]).set_index(sku_col)
-                for col_to_copy in ("Hoạt chất", "Thuốc kê đơn"):
-                    if col_to_copy in th_by_sku.columns and col_to_copy not in sp_ds.columns:
-                        sp_ds[col_to_copy] = sp_ds[sku_col].map(th_by_sku[col_to_copy])
-                sp_by_name = sp_ds.drop_duplicates(subset=[pname_col]).set_index(pname_col)
-                for dh_name in [k for k in tables if k.startswith("DonHang_ChiTiet") or (k.startswith("DanhSachHoaDonChiTiet") and k != "DanhSachHoaDonChiTietLo")]:
-                    dh_df = tables[dh_name]
-                    if sku_col in dh_df.columns:
-                        for col_to_copy in ("Hoạt chất", "Thuốc kê đơn"):
-                            if col_to_copy in th_by_sku.columns and col_to_copy not in dh_df.columns:
-                                dh_df[col_to_copy] = dh_df[sku_col].map(th_by_sku[col_to_copy])
-                    elif pname_col in dh_df.columns:
-                        for col_to_copy in (sku_col, "Hoạt chất", "Thuốc kê đơn"):
-                            if col_to_copy in sp_by_name.columns and col_to_copy not in dh_df.columns:
-                                dh_df[col_to_copy] = dh_df[pname_col].map(sp_by_name[col_to_copy])
+            for child_name, df_child in tables.items():
+                if child_name == parent_name:
+                    continue
+                child_id_col = next(
+                    (c for c in df_child.columns if c in all_order_id_set and (
+                        c == parent_id_col or len(set(df_parent[parent_id_col].dropna().astype(str)) & set(df_child[c].dropna().astype(str))) > 0
+                    )),
+                    None
+                )
+                if child_id_col:
+                    for col_name in cols_to_share:
+                        if col_name not in df_child.columns:
+                            df_child[col_name] = df_child[child_id_col].map(parent_dedup[col_name])
 
-        # 3e. chi_tiet_don + don_hang + san_pham + khach_hang (biz_111, biz_123, biz_127, biz_129)
-        if "chi_tiet_don" in tables and "don_hang" in tables:
-            ct_df = tables["chi_tiet_don"]
-            dh_df = tables["don_hang"]
+        # 3b. Liên kết Bảng Danh mục Hàng hóa / Thuốc -> Bảng bán / nhập qua Mã hàng / SKU
+        prod_id_set = {
+            "Mã hàng", "MaHang", "Mã SKU", "SKU", "MaHangHoa", "Mã sản phẩm", "Mã sản phẩm bán",
+            "Mã mặt hàng", "Mã hàng bán", "ID SP", "MaSP", "ma_sp", "Ma hang", "Mã HH"
+        }
+        for cat_name, df_cat in list(tables.items()):
+            cat_id_col = next((c for c in df_cat.columns if c in prod_id_set), None)
+            if not cat_id_col:
+                continue
+            cat_dedup = df_cat.drop_duplicates(subset=[cat_id_col]).set_index(cat_id_col)
+            attrs_to_share = [
+                c for c in (
+                    "Tên hàng", "Tên sản phẩm", "Tên SP", "Tên mặt hàng", "Mặt hàng", "Sản phẩm", "Món",
+                    "Hoạt chất", "Thuốc kê đơn", "Kê đơn", "Nhóm hàng", "Nhom hang", "DanhMuc",
+                    "Giá nhập", "Đơn giá", "Đơn vị tính", "ĐVT"
+                )
+                if c in cat_dedup.columns
+            ]
+            if not attrs_to_share:
+                continue
+            for target_name, df_target in tables.items():
+                if target_name == cat_name:
+                    continue
+                target_id_col = next(
+                    (c for c in df_target.columns if c in prod_id_set and (
+                        c == cat_id_col or len(set(df_cat[cat_id_col].dropna().astype(str)) & set(df_target[c].dropna().astype(str))) > 0
+                    )),
+                    None
+                )
+                if target_id_col:
+                    for attr in attrs_to_share:
+                        if attr not in df_target.columns:
+                            df_target[attr] = df_target[target_id_col].map(cat_dedup[attr])
 
-            dh_ord_col = next((c for c in ("Mã chứng từ", "MaHoaDon", "Mã đơn hàng", "Số phiếu", "Mã giao dịch") if c in dh_df.columns), None)
-            ct_ord_col = next((c for c in ("Ma don", "MaHoaDon", "Mã đơn hàng", "Số CT", "Mã giao dịch") if c in ct_df.columns), None)
-
-            if dh_ord_col and ct_ord_col:
-                dh_dedup = dh_df.drop_duplicates(subset=[dh_ord_col]).set_index(dh_ord_col)
-                for src_col, target_col in [
-                    ("Ngày", "Ngày"),
-                    ("Thời gian", "Thời gian"),
-                    ("Trạng thái", "Trạng thái"),
-                    ("status_norm", "status_norm"),
-                    ("Phương thức TT", "Phương thức TT"),
-                    ("Kênh bán", "Kênh bán"),
-                    ("Bán qua", "Kênh bán"),
-                    ("KenhBanHang", "Kênh bán"),
-                    ("Loại bán", "Kênh bán"),
-                    ("Hình thức thanh toán", "Phương thức TT"),
-                ]:
-                    if src_col in dh_dedup.columns and target_col not in ct_df.columns:
-                        ct_df[target_col] = ct_df[ct_ord_col].map(dh_dedup[src_col])
-
-                dh_cust_col = next((c for c in ("Số KH", "MaKhachHang", "Customer ID", "Mã khách mua", "Mã KH") if c in dh_dedup.columns), None)
-                if dh_cust_col and "Mã KH" not in ct_df.columns:
-                    ct_df["Mã KH"] = ct_df[ct_ord_col].map(dh_dedup[dh_cust_col])
-
-                if "khach_hang" in tables:
-                    kh_df = tables["khach_hang"]
-                    kh_id_col = next((c for c in ("ma_kh", "MaKhachHang", "Mã KH", "Mã khách lẻ/sỉ") if c in kh_df.columns), None)
-                    kh_name_col = next((c for c in ("Khách lẻ/sỉ", "TenGoi", "Khách hàng (tên)", "Tên công ty", "KH", "Tên khách hàng") if c in kh_df.columns), None)
-                    if kh_id_col and kh_name_col and "Mã KH" in ct_df.columns and "Tên KH" not in ct_df.columns:
-                        kh_map = kh_df.drop_duplicates(subset=[kh_id_col]).set_index(kh_id_col)[kh_name_col]
-                        ct_df["Tên KH"] = ct_df["Mã KH"].map(kh_map)
-                        if "Tên KH" not in dh_df.columns and dh_cust_col:
-                            dh_df["Tên KH"] = dh_df[dh_cust_col].map(kh_map)
-
-            if "san_pham" in tables:
-                sp_df = tables["san_pham"]
-                sp_id_col = next((c for c in ("SKU", "MaHangHoa", "Mã sản phẩm bán", "Mã HH", "Mã hàng") if c in sp_df.columns), None)
-                ct_prod_col = next((c for c in ("ID SP", "MaHangHoa", "Mã mặt hàng", "Mã hàng bán", "Mã hàng") if c in ct_df.columns), None)
-                sp_name_col = next((c for c in ("Sản phẩm", "TenGoi", "Tên SP", "Tên sản phẩm", "Tên hàng") if c in sp_df.columns), None)
-                if sp_id_col and ct_prod_col and sp_name_col:
-                    sp_dedup = sp_df.drop_duplicates(subset=[sp_id_col]).set_index(sp_id_col)
-                    if "Tên sản phẩm" not in ct_df.columns:
-                        ct_df["Tên sản phẩm"] = ct_df[ct_prod_col].map(sp_dedup[sp_name_col])
-                    if "Tên hàng" not in ct_df.columns:
-                        ct_df["Tên hàng"] = ct_df["Tên sản phẩm"]
-                    for col_to_copy in ("Hoạt chất", "Thuốc kê đơn", "Kê đơn", "Nhom hang", "DanhMuc"):
-                        if col_to_copy in sp_dedup.columns and col_to_copy not in ct_df.columns:
-                            ct_df[col_to_copy] = ct_df[ct_prod_col].map(sp_dedup[col_to_copy])
+        # 3c. Liên kết Bảng Khách hàng -> Bảng bán hàng qua Mã KH
+        cust_id_set = {"Mã KH", "MaKhachHang", "Customer ID", "Mã khách mua", "ma_kh", "Số KH", "Mã khách lẻ/sỉ"}
+        for cust_tbl_name, df_cust in list(tables.items()):
+            cust_id_col = next((c for c in df_cust.columns if c in cust_id_set), None)
+            if not cust_id_col:
+                continue
+            cust_name_col = next(
+                (c for c in df_cust.columns if c != cust_id_col and c not in cust_id_set and any(k in c.lower() for k in ["tên", "ten", "tengoi", "bên mua"])),
+                None
+            )
+            if not cust_name_col or cust_name_col not in df_cust.columns:
+                continue
+            cust_dedup = df_cust.drop_duplicates(subset=[cust_id_col]).set_index(cust_id_col)[cust_name_col]
+            for target_name, df_target in tables.items():
+                if target_name == cust_tbl_name:
+                    continue
+                target_cust_id = next((c for c in df_target.columns if c == cust_id_col or (c in cust_id_set and len(set(df_cust[cust_id_col].dropna().astype(str)) & set(df_target[c].dropna().astype(str))) > 0)), None)
+                if target_cust_id and "Tên KH" not in df_target.columns and "Khách hàng" not in df_target.columns:
+                    df_target["Tên KH"] = df_target[target_cust_id].map(cust_dedup)
 
         # Đảm bảo mọi bảng có 'Trạng thái' đều có 'status_norm', và mọi bảng có 'Ngày' đều có 'Thời gian'
         for tbl_name, df in tables.items():

@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from evaluate import evaluate_predictions, load_jsonl
-from model.baseline import DEFAULT_QWEN_7B_MODEL, DataMateAgent, QwenCoderClient
+from model.baseline import DEFAULT_MODEL, DEFAULT_QWEN_14B_AWQ_MODEL, DataMateAgent, QwenCoderClient
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -66,17 +66,23 @@ def parse_args() -> argparse.Namespace:
         help="Đường dẫn xuất file kết quả submission.jsonl.",
     )
     parser.add_argument(
+        "--details-output",
+        type=Path,
+        default=None,
+        help="Đường dẫn xuất file chi tiết so sánh 2 prompt (mặc định: <output>_details.jsonl).",
+    )
+    parser.add_argument(
         "--backend",
         type=str,
-        choices=["openai", "ollama", "transformers"],
+        choices=["openai", "ollama", "transformers", "mock"],
         default="openai",
-        help="Backend thực thi LLM Qwen 7B (mặc định: openai / vLLM).",
+        help="Backend thực thi LLM (mặc định: openai / vLLM, hỗ trợ 'mock' cho CI/Dry-run).",
     )
     parser.add_argument(
         "--model",
         type=str,
-        default=DEFAULT_QWEN_7B_MODEL,
-        help="Tên hoặc đường dẫn mô hình Qwen 7B (mặc định: Qwen/Qwen2.5-Coder-7B-Instruct).",
+        default=DEFAULT_MODEL,
+        help="Tên hoặc đường dẫn mô hình (mặc định: Qwen/Qwen2.5-Coder-14B-Instruct-AWQ).",
     )
     parser.add_argument(
         "--api-base",
@@ -203,11 +209,22 @@ def main() -> None:
     if args.limit and args.limit > 0:
         questions = questions[: args.limit]
 
-    llm_client = QwenCoderClient(
-        backend=args.backend,
-        model_name=args.model,
-        api_base=args.api_base,
-    )
+    if args.backend == "mock":
+        def mock_generator(messages: List[Dict[str, str]]) -> str:
+            # Deterministic mock code cho dry-run test
+            return '```python\nresult = {"type": "number", "answer": 123456}\n```'
+
+        llm_client = QwenCoderClient(
+            backend="custom",
+            model_name=args.model,
+            custom_generator=mock_generator,
+        )
+    else:
+        llm_client = QwenCoderClient(
+            backend=args.backend,
+            model_name=args.model,
+            api_base=args.api_base,
+        )
 
     agent = DataMateAgent(
         data_root=args.data_root,
@@ -221,8 +238,13 @@ def main() -> None:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
+    details_path = args.details_output or args.output.with_name(args.output.stem + "_details.jsonl")
+    tmp_output = args.output.with_suffix(".jsonl.tmp")
+    tmp_details = details_path.with_suffix(".jsonl.tmp")
+
     # Nạp các câu trả lời tốt đã có từ trước (không phải abstain) nếu không bật cờ --fresh
     existing_cache: Dict[str, Dict[str, Any]] = {}
+    existing_details: Dict[str, Dict[str, Any]] = {}
     if not args.fresh and args.output.exists():
         for ln in args.output.read_text(encoding="utf-8").splitlines():
             if ln.strip():
@@ -230,6 +252,15 @@ def main() -> None:
                     item = json.loads(ln)
                     if item.get("type") != "abstain":
                         existing_cache[item["id"]] = item
+                except Exception:
+                    pass
+    if not args.fresh and details_path.exists():
+        for ln in details_path.read_text(encoding="utf-8").splitlines():
+            if ln.strip():
+                try:
+                    d_item = json.loads(ln)
+                    if "id" in d_item:
+                        existing_details[d_item["id"]] = d_item
                 except Exception:
                     pass
     if existing_cache:
@@ -246,12 +277,15 @@ def main() -> None:
     print(f"✅ Đã chuẩn bị xong dữ liệu {len(biz_ids)} doanh nghiệp trong {time.time() - t_prewarm:.1f}s!")
 
     results: List[Optional[Dict[str, Any]]] = [None] * len(questions)
+    details_results: List[Optional[Dict[str, Any]]] = [None] * len(questions)
     completed_count = 0
 
     for idx, q_obj in enumerate(questions):
         qid = q_obj["id"]
         if qid in existing_cache:
             results[idx] = existing_cache[qid]
+            if qid in existing_details:
+                details_results[idx] = existing_details[qid]
             completed_count += 1
 
     to_run = [(idx, q_obj) for idx, q_obj in enumerate(questions) if results[idx] is None]
@@ -282,7 +316,6 @@ def main() -> None:
 
     notify_colab(f"🚀 BẮT ĐẦU CHẠY PIPELINE (Đã bảo lưu {len(existing_cache)} câu tốt, tối ưu prompt L4, concurrency={args.concurrency})...")
 
-    tmp_output = args.output.with_suffix(".jsonl.tmp")
     lock = threading.Lock()
     start_time = time.time()
 
@@ -291,22 +324,27 @@ def main() -> None:
             for r in results:
                 if r is not None:
                     out_f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        with tmp_details.open("w", encoding="utf-8") as out_d:
+            for d in details_results:
+                if d is not None:
+                    out_d.write(json.dumps(d, ensure_ascii=False) + "\n")
 
     _flush_tmp()
 
-    def _solve_item(item: Tuple[int, Dict[str, Any]]) -> Tuple[int, Dict[str, Any]]:
+    def _solve_item(item: Tuple[int, Dict[str, Any]]) -> Tuple[int, Dict[str, Any], Dict[str, Any]]:
         idx, q_obj = item
-        pred = agent.answer_question(q_obj)
-        return idx, pred
+        pred, details = agent.answer_question_dual(q_obj)
+        return idx, pred, details
 
     if to_run:
         if args.concurrency > 1 and len(to_run) > 1:
             with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
                 futures = {pool.submit(_solve_item, item): item for item in to_run}
                 for fut in as_completed(futures):
-                    idx, pred = fut.result()
+                    idx, pred, details = fut.result()
                     with lock:
                         results[idx] = pred
+                        details_results[idx] = details
                         completed_count += 1
                         _flush_tmp()
 
@@ -322,8 +360,9 @@ def main() -> None:
                         if len(ans_preview) > 35:
                             ans_preview = ans_preview[:32] + "..."
 
+                        status_tag = "ĐỒNG THUẬN" if details.get("is_consensus") else "ABSTAIN"
                         log_line = (
-                            f"[{completed_count}/{len(questions)}] ({completed_count/len(questions)*100:.1f}%) [MỚI] "
+                            f"[{completed_count}/{len(questions)}] ({completed_count/len(questions)*100:.1f}%) [{status_tag}] "
                             f"{qid} ({q_obj['business_id']}) -> {pred.get('type')}: {ans_preview} | Tốc độ: {avg_speed:.2f}s/câu | ETA: {rem_mins:.1f}m"
                         )
                         if done_new == 1 or done_new % 3 == 0 or completed_count == len(questions):
@@ -331,8 +370,9 @@ def main() -> None:
                             notify_colab(log_line)
         else:
             for idx, q_obj in to_run:
-                pred = agent.answer_question(q_obj)
+                pred, details = agent.answer_question_dual(q_obj)
                 results[idx] = pred
+                details_results[idx] = details
                 completed_count += 1
                 _flush_tmp()
 
@@ -347,8 +387,9 @@ def main() -> None:
                 if len(ans_preview) > 35:
                     ans_preview = ans_preview[:32] + "..."
 
+                status_tag = "ĐỒNG THUẬN" if details.get("is_consensus") else "ABSTAIN"
                 log_line = (
-                    f"[{completed_count}/{len(questions)}] ({completed_count/len(questions)*100:.1f}%) [MỚI] "
+                    f"[{completed_count}/{len(questions)}] ({completed_count/len(questions)*100:.1f}%) [{status_tag}] "
                     f"{qid} ({q_obj['business_id']}) -> {pred.get('type')}: {ans_preview} | Tốc độ: {avg_speed:.2f}s/câu | ETA: {rem_mins:.1f}m"
                 )
                 if done_new == 1 or done_new % 3 == 0 or completed_count == len(questions):
@@ -357,16 +398,13 @@ def main() -> None:
 
     # Đổi tên file tạm thành file chính thức an toàn
     shutil.move(str(tmp_output), str(args.output))
+    shutil.move(str(tmp_details), str(details_path))
 
     notify_colab("PIPELINE_COMPLETE_SHUTDOWN: Đã hoàn tất 100% toàn bộ câu hỏi! Đang tự động ngắt phiên Colab để tiết kiệm CU...")
-    try:
-        import subprocess
-        subprocess.Popen(["afplay", "/System/Library/Sounds/Glass.aiff"])
-    except Exception:
-        pass
 
     predictions = [r for r in results if r is not None]
-    print(f"Đã xuất kết quả dự đoán tại: {args.output}")
+    print(f"✅ Đã xuất kết quả dự đoán chính thức tại: {args.output}")
+    print(f"✅ Đã xuất bảng chi tiết đối chiếu 2 prompt tại: {details_path}")
 
     if args.evaluate and args.gold.exists():
         all_gold = load_jsonl(args.gold)

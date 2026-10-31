@@ -203,7 +203,18 @@ class DateResolver:
                 }
             )
 
-        if re.search(r"\b(tuần\s*(?:trước|trc|rồi|vừa\s*qua)|tuan\s*(?:truoc|trc|roi|vua\s*qua))\b", q_lower):
+        if re.search(r"\b((?:2|hai)\s*tuần\s*(?:trước|trc|rồi|vừa\s*qua)|(?:2|hai)\s*tuan\s*(?:truoc|trc|roi|vua\s*qua))\b", q_lower):
+            two_w_start = last_week_start - timedelta(days=7)
+            two_w_end = last_week_end - timedelta(days=7)
+            detected.append(
+                {
+                    "expr": "Hai tuần trước (2 tuần trước)",
+                    "start_date": two_w_start.isoformat(),
+                    "end_date": two_w_end.isoformat(),
+                    "note": f"Khoảng 2 tuần trước từ Thứ Hai ({two_w_start.isoformat()}) đến Chủ Nhật ({two_w_end.isoformat()})",
+                }
+            )
+        elif re.search(r"\b(tuần\s*(?:trước|trc|rồi|vừa\s*qua)|tuan\s*(?:truoc|trc|roi|vua\s*qua))\b", q_lower):
             detected.append(
                 {
                     "expr": "Tuần trước / tuần rồi",
@@ -241,6 +252,15 @@ class DateResolver:
                         "start_date": prev_month_full_start.isoformat(),
                         "end_date": prev_month_full_end.isoformat(),
                         "note": f"Toàn bộ tháng liền trước ({prev_month_full_start.isoformat()} đến {prev_month_full_end.isoformat()})",
+                    }
+                )
+            else:
+                detected.append(
+                    {
+                        "expr": "Kỳ so với tháng trước (cùng số ngày với tháng này)",
+                        "start_date": prev_month_full_start.isoformat(),
+                        "end_date": prev_month_same_days_end.isoformat(),
+                        "note": f"Từ ngày 01 đến ngày cùng số của tháng trước ({prev_month_full_start.isoformat()} đến {prev_month_same_days_end.isoformat()})",
                     }
                 )
 
@@ -291,8 +311,27 @@ class DateResolver:
                 }
             )
 
-        # 3. Phát hiện ngày cụ thể DD/MM/YYYY hoặc DD-MM-YYYY
+        # 2b. Phát hiện dải ngày cụ thể: Từ DD/MM/YYYY đến (hết) DD/MM/YYYY
+        range_match = re.search(r"\btừ\s*(?:ngày\s*)?(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\s*(?:đến|tới|den|toi)\s*(?:hết\s*)?(?:ngày\s*)?(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b", q_lower)
+        if range_match:
+            try:
+                s_dt = date(int(range_match.group(3)), int(range_match.group(2)), int(range_match.group(1)))
+                e_dt = date(int(range_match.group(6)), int(range_match.group(5)), int(range_match.group(4)))
+                detected.append(
+                    {
+                        "expr": range_match.group(0),
+                        "start_date": s_dt.isoformat(),
+                        "end_date": e_dt.isoformat(),
+                        "note": f"Dải ngày từ {s_dt.isoformat()} đến hết {e_dt.isoformat()}",
+                    }
+                )
+            except ValueError:
+                pass
+
+        # 3. Phát hiện ngày cụ thể DD/MM/YYYY hoặc DD-MM-YYYY (nếu chưa nằm trong dải ngày trên)
         for m in re.finditer(r"\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b", q_lower):
+            if range_match and m.start() >= range_match.start() and m.end() <= range_match.end():
+                continue
             d_val, m_val, y_val = int(m.group(1)), int(m.group(2)), int(m.group(3))
             try:
                 exact_dt = date(y_val, m_val, d_val)

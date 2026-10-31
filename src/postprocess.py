@@ -238,9 +238,17 @@ def postprocess_and_guard(
                 return abstain_resp
 
         # Sanity Guard 2: Lọc sót ngày dẫn tới cộng dồn toàn bộ doanh thu shop (> 500 triệu cho 1 ngày duy nhất)
-        if any(k in q_low for k in ["hôm nay", "hnay", "hom ni", "hôm qua", "hom qua", "bữa qua", "bua qua", "bữa nay", "bua nay"]):
-            if final_num > 500000000:
-                return abstain_resp
+        # Chỉ áp dụng khi câu hỏi thực sự chỉ hỏi 1 ngày đơn lẻ, KHÔNG áp dụng cho các kỳ dài (đầu năm, năm nay, tháng, 30 ngày...)
+        long_period_keywords = (
+            "đầu năm", "dau nam", "năm nay", "nam nay", "cả năm", "ca nam",
+            "30 ngày", "30 ngay", "tháng", "thang", "tuần", "tuan", "giai đoạn",
+            "khoảng", "khoang", "kể từ", "ke tu", "từ ngày", "tu ngay"
+        )
+        is_single_day_q = any(k in q_low for k in ["riêng hôm nay", "trong ngày hôm nay", "doanh thu hôm nay", "dthu hôm nay", "hôm qua", "hom qua", "bữa qua", "bua qua"]) or (
+            any(k in q_low for k in ["hôm nay", "hnay", "hom ni", "bữa nay", "bua nay"]) and not any(lp in q_low for lp in long_period_keywords)
+        )
+        if is_single_day_q and final_num > 500000000:
+            return abstain_resp
 
         # Sanity Guard 3: Nếu câu hỏi về doanh thu / số đơn phát sinh trong ngày/tuần/tháng đang hoạt động mà ra 0
         # thì 99% là lỗi lọc ngày rỗng -> kích hoạt abstain (0 điểm) để tránh nhận điểm phạt (-1 điểm)
@@ -429,13 +437,18 @@ def postprocess_and_guard(
             if not isinstance(row, (list, tuple)) or len(row) != len(clean_cols):
                 return abstain_resp
             c_row: List[Any] = []
+            is_walkin_row = False
             for idx, cell in enumerate(row):
                 if cell is None:
                     return abstain_resp
                 if idx == 0 and isinstance(cell, str):
-                    s_cell = unicodedata.normalize("NFC", cell).strip()
+                    s_cell = strip_trailing_measurement_in_parens(unicodedata.normalize("NFC", cell)).strip()
                     if not s_cell:
                         return abstain_resp
+                    # Mục 3 Rulebook: Khách lẻ / khách vãng lai không xếp hạng
+                    if s_cell.lower() in ("khách lẻ", "khach le", "lẻ", "le", "kl", "khách vãng lai"):
+                        is_walkin_row = True
+                        break
                     c_row.append(s_cell)
                 elif isinstance(cell, (int, float)) and not isinstance(cell, bool):
                     if math.isnan(cell) or math.isinf(cell):
@@ -445,10 +458,15 @@ def postprocess_and_guard(
                     else:
                         c_row.append(round_half_up_2dec(float(cell)))
                 elif isinstance(cell, str):
-                    c_row.append(unicodedata.normalize("NFC", cell).strip())
+                    s_str = strip_trailing_measurement_in_parens(unicodedata.normalize("NFC", cell)).strip()
+                    c_row.append(s_str)
                 else:
                     return abstain_resp
-            clean_rows.append(c_row)
+            if not is_walkin_row:
+                clean_rows.append(c_row)
+
+        if not clean_rows:
+            return abstain_resp
 
         return {
             "id": question_id,
@@ -457,3 +475,105 @@ def postprocess_and_guard(
         }
 
     return abstain_resp
+
+
+def check_consensus(pred1: Dict[str, Any], pred2: Dict[str, Any]) -> bool:
+    """
+    Kiểm tra tính đồng thuận giữa hai lời giải độc lập (Dual-Prompt Consensus Gate).
+    Chỉ trả về True khi cả hai lời giải ra CÙNG MỘT ĐÁP ÁN (cùng type, cùng giá trị sau khi làm tròn chuẩn).
+    Nếu bất kỳ bên nào lỗi, abstain hoặc vênh nhau -> trả về False để kích hoạt Abstain an toàn.
+    """
+    if not isinstance(pred1, dict) or not isinstance(pred2, dict):
+        return False
+
+    t1 = str(pred1.get("type", "")).strip().lower()
+    t2 = str(pred2.get("type", "")).strip().lower()
+
+    if not t1 or not t2:
+        return False
+
+    # Nếu một trong hai bên là abstain -> không có đồng thuận hợp lệ
+    if t1 == "abstain" or t2 == "abstain":
+        return False
+
+    # Cả hai đều kết luận không thể trả lời -> Đồng thuận
+    if t1 == "unanswerable" and t2 == "unanswerable":
+        return True
+    if t1 == "unanswerable" or t2 == "unanswerable":
+        return False
+
+    # Khác type -> Bất đồng
+    if t1 != t2:
+        return False
+
+    a1 = pred1.get("answer")
+    a2 = pred2.get("answer")
+    if a1 is None or a2 is None:
+        return False
+
+    # 1. So khớp NUMBER hoặc PERCENT
+    if t1 in ("number", "percent"):
+        try:
+            f1 = float(a1)
+            f2 = float(a2)
+            if math.isnan(f1) or math.isnan(f2) or math.isinf(f1) or math.isinf(f2):
+                return False
+            # Khớp tuyệt đối hoặc sai số dấu phẩy động cực nhỏ < 1e-4
+            return abs(f1 - f2) < 1e-4
+        except (ValueError, TypeError):
+            return False
+
+    # 2. So khớp DATE
+    if t1 == "date":
+        return str(a1).strip() == str(a2).strip()
+
+    # 3. So khớp BOOLEAN
+    if t1 == "boolean":
+        return bool(a1) == bool(a2)
+
+    # 4. So khớp STRING
+    if t1 == "string":
+        s1 = unicodedata.normalize("NFC", str(a1)).strip().lower()
+        s2 = unicodedata.normalize("NFC", str(a2)).strip().lower()
+        return s1 == s2
+
+    # 5. So khớp LIST
+    if t1 == "list":
+        if not isinstance(a1, list) or not isinstance(a2, list):
+            return False
+        if len(a1) != len(a2):
+            return False
+        for x, y in zip(a1, a2):
+            if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+                if abs(float(x) - float(y)) >= 1e-4:
+                    return False
+            else:
+                sx = unicodedata.normalize("NFC", str(x)).strip().lower()
+                sy = unicodedata.normalize("NFC", str(y)).strip().lower()
+                if sx != sy:
+                    return False
+        return True
+
+    # 6. So khớp TABLE
+    if t1 == "table":
+        if not isinstance(a1, dict) or not isinstance(a2, dict):
+            return False
+        r1 = a1.get("rows")
+        r2 = a2.get("rows")
+        if not isinstance(r1, list) or not isinstance(r2, list):
+            return False
+        if len(r1) != len(r2):
+            return False
+        for row1, row2 in zip(r1, r2):
+            if len(row1) != len(row2):
+                return False
+            for c1, c2 in zip(row1, row2):
+                if isinstance(c1, (int, float)) and isinstance(c2, (int, float)):
+                    if abs(float(c1) - float(c2)) >= 1e-4:
+                        return False
+                else:
+                    if str(c1).strip().lower() != str(c2).strip().lower():
+                        return False
+        return True
+
+    return False

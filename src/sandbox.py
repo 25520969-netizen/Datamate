@@ -20,6 +20,23 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 
+class _FuzzyDateContext(dict):
+    def __getitem__(self, key):
+        if key in self:
+            return super().__getitem__(key)
+        k_low = str(key).lower().replace(" ", "_")
+        for orig_k in self:
+            if orig_k.lower().replace(" ", "_") == k_low:
+                return super().__getitem__(orig_k)
+        if "two_week" in k_low or "2_week" in k_low or "hai_tuan" in k_low or "2_tuan" in k_low:
+            return self.get("two_weeks_ago", self.get("two_weeks_before", self.get("hai tuần trước", (self.get("as_of_date"), self.get("as_of_date")))))
+        if "week" in k_low or "tuan" in k_low:
+            return self.get("this_week", (self.get("as_of_date"), self.get("as_of_date")))
+        if "month" in k_low or "thang" in k_low:
+            return self.get("this_month", (self.get("as_of_date"), self.get("as_of_date")))
+        return (self.get("as_of_date"), self.get("as_of_date"))
+
+
 SANDBOX_RUNNER_TEMPLATE = r'''# -*- coding: utf-8 -*-
 import json
 import math
@@ -64,7 +81,7 @@ class _FuzzyDateContext(dict):
             if orig_k.lower().replace(" ", "_") == k_low:
                 return super().__getitem__(orig_k)
         if "two_week" in k_low or "2_week" in k_low or "hai_tuan" in k_low or "2_tuan" in k_low:
-            return self.get("last_week", (self.get("as_of_date"), self.get("as_of_date")))
+            return self.get("two_weeks_ago", self.get("two_weeks_before", self.get("hai tuần trước", (self.get("as_of_date"), self.get("as_of_date")))))
         if "week" in k_low or "tuan" in k_low:
             return self.get("this_week", (self.get("as_of_date"), self.get("as_of_date")))
         if "month" in k_low or "thang" in k_low:
@@ -178,6 +195,13 @@ def main():
         if raw_res is None and callable(env.get("solve")):
             raw_res = env["solve"](tables, con, as_of_date)
 
+        # Nếu kết quả là DuckDB Relation, chuyển về DataFrame trước
+        if hasattr(raw_res, "df") and callable(getattr(raw_res, "df")):
+            try:
+                raw_res = raw_res.df()
+            except Exception:
+                pass
+
         # Nếu kết quả là DataFrame hoặc Series, chuyển đổi sang cấu trúc chuẩn
         if isinstance(raw_res, pd.DataFrame):
             raw_res = {
@@ -230,10 +254,20 @@ def extract_python_code(llm_response: str) -> str:
     """Trích xuất khối mã Python từ phản hồi Markdown của LLM (kể cả khi thiếu dấu đóng ``` hoặc có lời dẫn)."""
     if not llm_response:
         return ""
-    # 1. Ưu tiên khối ```python ... ``` đã đóng hoàn chỉnh
-    matches = re.findall(r"```(?:python|py)?\s*\n(.*?)```", llm_response, flags=re.DOTALL | re.IGNORECASE)
-    if matches:
-        return matches[-1].strip()
+    # 1. Ưu tiên khối ```python ... ``` hoặc ```py ... ``` đã đóng hoàn chỉnh
+    py_matches = re.findall(r"```(?:python|py)\s*\n(.*?)```", llm_response, flags=re.DOTALL | re.IGNORECASE)
+    if py_matches:
+        return py_matches[-1].strip()
+
+    # 1b. Khối ``` ... ``` bất kỳ đã đóng hoàn chỉnh nếu không có thẻ python rõ ràng
+    any_matches = re.findall(r"```\s*\n(.*?)```", llm_response, flags=re.DOTALL)
+    if any_matches:
+        # Lọc các block trông giống code python (chứa import, =, return, def, con, tables, df)
+        for cand in reversed(any_matches):
+            c_str = cand.strip()
+            if any(k in c_str for k in ("=", "import ", "result", "con.", "tables[", "def ")):
+                return c_str
+        return any_matches[-1].strip()
 
     # 2. Nếu có mở ```python nhưng bị cắt trước dấu đóng ```
     open_match = re.search(r"```(?:python|py)?\s*\n(.*)$", llm_response, flags=re.DOTALL | re.IGNORECASE)

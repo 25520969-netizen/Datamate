@@ -126,6 +126,70 @@ class DynamicEntityGrounder:
 DEFAULT_RULEBOOK_PATH = Path(__file__).resolve().parent.parent / "train" / "rulebook.md"
 
 
+class RulebookKnobs:
+    """Các tham số cấu hình (núm) đọc động từ rulebook.md của split tương ứng."""
+    def __init__(self) -> None:
+        self.week_start_day: str = "thứ Hai"
+        self.shift_morning: Tuple[str, str] = ("06:00", "13:59")
+        self.shift_afternoon: Tuple[str, str] = ("14:00", "21:59")
+        self.tet_start_lunar_day: int = 23
+        self.tet_start_lunar_month: int = 12
+        self.tet_end_lunar_day: int = 10
+        self.tet_end_lunar_month: int = 1
+        self.money_decimals: int = 0
+        self.percent_decimals: int = 2
+        self.excluded_statuses: List[str] = ["Đã hủy", "Trả hàng"]
+
+    def __repr__(self) -> str:
+        return (
+            f"RulebookKnobs(week_start='{self.week_start_day}', "
+            f"morning={self.shift_morning}, afternoon={self.shift_afternoon}, "
+            f"money_dec={self.money_decimals}, pct_dec={self.percent_decimals})"
+        )
+
+
+class RulebookKnobReader:
+    """Trích xuất tự động các tham số cấu hình từ file rulebook.md mà không hardcode."""
+
+    @staticmethod
+    def parse_knobs(rulebook_text: str) -> RulebookKnobs:
+        knobs = RulebookKnobs()
+        if not rulebook_text:
+            return knobs
+
+        # 1. Ngày đầu tuần
+        m_week = re.search(r"Tuần.*?bắt đầu\s+\*\*([^\*]+)\*\*", rulebook_text, re.IGNORECASE)
+        if m_week:
+            knobs.week_start_day = m_week.group(1).strip()
+
+        # 2. Khung giờ ca sáng / ca chiều
+        m_morning = re.search(r"ca sáng\s+(\d{1,2}:\d{2})[–-](\d{1,2}:\d{2})", rulebook_text, re.IGNORECASE)
+        if m_morning:
+            knobs.shift_morning = (m_morning.group(1), m_morning.group(2))
+
+        m_afternoon = re.search(r"ca chiều\s+(\d{1,2}:\d{2})[–-](\d{1,2}:\d{2})", rulebook_text, re.IGNORECASE)
+        if m_afternoon:
+            knobs.shift_afternoon = (m_afternoon.group(1), m_afternoon.group(2))
+
+        # 3. Mùa Tết âm lịch
+        m_tet_start = re.search(r"(\d{1,2})\s+tháng Chạp", rulebook_text, re.IGNORECASE)
+        if m_tet_start:
+            knobs.tet_start_lunar_day = int(m_tet_start.group(1))
+
+        m_tet_end = re.search(r"mùng\s+(\d{1,2})\s+tháng Giêng", rulebook_text, re.IGNORECASE)
+        if m_tet_end:
+            knobs.tet_end_lunar_day = int(m_tet_end.group(1))
+
+        # 4. Làm tròn tiền và phần trăm
+        if "làm tròn về đồng" in rulebook_text.lower():
+            knobs.money_decimals = 0
+        m_pct_dec = re.search(r"phần trăm.*?làm tròn\s+(\d+)\s+chữ số thập phân", rulebook_text, re.IGNORECASE)
+        if m_pct_dec:
+            knobs.percent_decimals = int(m_pct_dec.group(1))
+
+        return knobs
+
+
 class RuleEngine:
     """Bộ phân tích câu hỏi và trích xuất luật nghiệp vụ theo BIRD Knowledge Injection paradigm."""
 
@@ -133,12 +197,15 @@ class RuleEngine:
         self.rulebook_path = rulebook_path
         self.sections: Dict[str, str] = {}
         self.full_rulebook: str = ""
+        self.knobs: RulebookKnobs = RulebookKnobs()
         self._load_rulebook()
 
     def _load_rulebook(self) -> None:
         if not self.rulebook_path.exists():
             return
         self.full_rulebook = self.rulebook_path.read_text(encoding="utf-8")
+        self.knobs = RulebookKnobReader.parse_knobs(self.full_rulebook)
+
         current_header = "intro"
         buf: List[str] = []
         for line in self.full_rulebook.splitlines():
@@ -172,6 +239,13 @@ class RuleEngine:
         s = re.sub(r"\bhown\b", "hơn", s)
         s = re.sub(r"\btrar\b", "trả", s)
         s = re.sub(r"\bhees\b", "hết", s)
+        s = re.sub(r"\bngayf\b", "ngày", s)
+        s = re.sub(r"\bnhaats\b", "nhất", s)
+        s = re.sub(r"\btrawm\b", "trăm", s)
+        s = re.sub(r"\bnhieeuf\b", "nhiều", s)
+        s = re.sub(r"\bnhieeu\b", "nhiều", s)
+        s = re.sub(r"\bbieets\b", "biết", s)
+        s = re.sub(r"\bvaayj\b", "vậy", s)
         return s
 
     @staticmethod
@@ -223,17 +297,19 @@ class RuleEngine:
             return "table"
 
         # 2. Boolean: có phải ... không, đúng hay sai, tăng liên tục, luôn cao hơn
+        # Loại trừ 'hok kê đơn' / 'không kê đơn' tránh nhận nhầm câu hỏi thuốc là boolean
+        q_bool = re.sub(r"\b(?:hàng|thuốc|hang|thuoc)?\s*hok\s*(?:kê\s*đơn|ke\s*don)\b", "", q)
         if (
             re.search(
                 r"\b(có phải|co phai|có đúng|co dung|đúng không|dung khong|phải không|phai khong|không bạn|khong ban|"
                 r"không nhỉ|khong nhi|không shop|khong shop|hay không|hay khong|liệu có|lieu co|hok|k hả|k ha|"
                 r"đúng hay sai|có hay không|co hay khong)\b",
-                q,
+                q_bool,
             )
-            or q.endswith(" không?") or q.endswith(" khong?") or q.endswith(" k?") or q.endswith(" ko?")
-            or re.search(r"\b(?:có\s+)?(?:tăng\s+liên\s+tục|tang\s+lien\s+tuc|luôn\s+cao\s+hơn|luon\s+cao\s+hon)\s+.*(?:không|khong|k|ko|hok)", q)
+            or q_bool.endswith(" không?") or q_bool.endswith(" khong?") or q_bool.endswith(" k?") or q_bool.endswith(" ko?")
+            or re.search(r"\b(?:có\s+)?(?:tăng\s+liên\s+tục|tang\s+lien\s+tuc|luôn\s+cao\s+hơn|luon\s+cao\s+hon)\s+.*(?:không|khong|k|ko|hok)", q_bool)
         ):
-            if not re.search(r"\b(bao nhiêu|nhiêu|mấy|may|ai|gì|gi|nào|nao)\b", q) or re.search(r"\b(?:tăng\s+liên\s+tục|tang\s+lien\s+tuc|luôn\s+cao\s+hơn)\b", q):
+            if not re.search(r"\b(bao nhiêu|nhiêu|mấy|may|ai|gì|gi|nào|nao)\b", q_bool) or re.search(r"\b(?:tăng\s+liên\s+tục|tang\s+lien\s+tuc|luôn\s+cao\s+hơn)\b", q_bool):
                 return "boolean"
 
         # 3. Percent: phần trăm, tỉ lệ, tỷ lệ, tỉ trọng, tỷ trọng, bao nhiêu %, mấy %, tăng/giảm bao nhiêu %
@@ -281,7 +357,7 @@ class RuleEngine:
         if re.search(
             r"\b(ngày nào|ngay nao|ngày mấy|ngay may|hôm nào|hom nao|khi nào|khi nao|bao giờ|bao gio|"
             r"hạn dùng ngày nào|han dung ngay nao|hạn sử dụng là ngày|ngày bao nhiêu|ngay bao nhieu|"
-            r"tháng nào|thang nao|vào tháng nào|vao thang nao)\b",
+            r"tháng nào|thang nao|vào tháng nào|vao thang nao|thang naof)\b",
             q,
         ):
             return "date"
@@ -292,14 +368,21 @@ class RuleEngine:
         if (
             re.search(
                 r"\b(mỗi loại bao nhiêu|mỗi loại bn|mỗi bên bao nhiêu|mỗi bên bn|mỗi thứ bao nhiêu|mỗi thứ bn|"
-                r"lần lượt là bao nhiêu|lần lượt là bn|lần lượt theo thứ tự|theo thứ tự đó|"
-                r"ghi hai số|ghi 2 số|hai số|2 số|trả lời hai số|tra loi hai so|trả lời 2 số|tra loi 2 so|"
+                r"moi loai bnhiu|moi loai bn|moi loai bao nhieu|moi ben bn|moi ben bao nhieu|"
+                r"mỗi tháng là bao nhiêu|mỗi tháng là bnhiu|mỗi tháng bnhiu|moi thang la bao nhieu|moi thang la bnhiu|"
+                r"lần lượt là bao nhiêu|lần lượt là bn|lần lượt theo thứ tự|theo thứ tự đó|theo thứ tự thời gian|theo thu tu thoi gian|"
+                r"ghi (?:hai|ba|[2-9]) số|ghi (?:hai|ba|[2-9]) so|hai số|2 số|ba số|3 số|trả lời hai số|tra loi hai so|trả lời 2 số|tra loi 2 so|"
+                r"ghi lần lượt|ghi lan luot|"
                 r"chẵn.*lẻ|chan.*le|hộp chẵn|vỉ chẵn|thùng chẵn|"
-                r"tuổi nợ|tuoi no)\b",
+                r"tuổi nợ|tuoi no|"
+                r"từ tháng cũ đến tháng mới|tu thang cu den thang moi)\b",
                 q,
             )
-            or len(re.findall(r"\b(?:bao\s*(?:nhiêu|nhiu)|bn)\b", q)) >= 2
+            or len(re.findall(r"\b(?:bao\s*(?:nhiêu|nhiu)|bn|bnhiu)\b", q)) >= 2
             or re.search(r"(?:dthu|doanh thu|tiền|tien).*?\b(?:và|va)\b.*?(?:dthu|doanh thu|tiền|tien)", q)
+            or re.search(r"(?:dthu|doanh thu|tiền|tien).*?[,;]\s*(?:doanh thu|dthu|tiền|tien)", q)
+            or re.search(r"(?:ghi\s*)?nợ\s*thêm.*?trả\s*(?:nợ\s*)?(?:được|dc|duoc)", q)
+            or re.search(r"(?:no them|ghi no them).*?(?:tra dc|tra duoc)", q)
         ):
             return "list"
 
@@ -326,7 +409,7 @@ class RuleEngine:
         if re.search(
             r"\b(ai là|ai la|ai đang|ai dang|ai trung thành|ai sộp|ai hay|ai được|ai bán|ai mua|ai có|ai chi|là ai|la ai|"
             r"mặt hàng nào|mat hang nao|hàng nào|hang nao|sản phẩm nào|san pham nao|món nào|mon nao|"
-            r"khách hàng nào|khach hang nao|khách nào|khach nao|nhà cung cấp nào|ncc nào|nhân viên nào|thợ nào|tho nao|"
+            r"khách hàng nào|khach hang nao|khách nào|khach nao|nhà cung cấp nào|nha cung cap nao|ncc nào|ncc nao|nhân viên nào|thợ nào|tho nao|"
             r"lô nào|lo nao|nhóm nào|kênh nào|hình thức nào|chi nhánh nào|thứ mấy|thu may|hàng hot nhất|mặt hàng hot nhất|"
             r"là gì|la gi|là chi|la chi)\b",
             q,
@@ -399,7 +482,7 @@ class RuleEngine:
 
         # 7. Lãi gộp / lãi ròng khi shop không có cột giá vốn
         if any(k in q for k in ["lãi gộp", "lai gop", "lợi nhuận gộp", "lãi ròng", "lai rong"]):
-            has_cogs = any("giá vốn" in c or "gia_von" in c for c in all_cols)
+            has_cogs = any(any(k in c for k in ["giá vốn", "gia_von", "giavon", "cost", "cogs", "giávốn"]) for c in all_cols)
             if not has_cogs:
                 return True, "Shop không có cột giá vốn trên dòng bán để tính lãi gộp theo Mục 5 Rulebook."
 
@@ -491,26 +574,31 @@ class RuleEngine:
         if has_sec5:
             selected_keys.append("5. Kho, nhập hàng, giá vốn")
 
-        # Mục 6: Theo ngành (chỉ nạp tiểu mục của đúng ngành cần thiết, tiết kiệm ~4000 ký tự prompt)
-        if any(kw in q or kw in readme_lower for kw in ["sửa xe", "sua xe", "thợ", "nhớt", "lượt xe"]):
-            selected_keys.append("6. Theo ngành - Sửa xe")
-        elif any(kw in q or kw in readme_lower for kw in ["điện thoại", "dien thoai", "máy cũ", "trả góp", "dòng máy", "imei", "bảo hành"]):
-            selected_keys.append("6. Theo ngành - Cửa hàng điện thoại")
-        elif any(kw in q or kw in readme_lower for kw in ["bỉm", "tã", "mẹ và bé", "thành viên mới", "voucher", "dùng điểm"]):
-            selected_keys.append("6. Theo ngành - Mẹ và bé")
-        elif any(kw in q or kw in readme_lower for kw in ["thuốc", "kê đơn", "hoạt chất", "hạn dùng", "hạn sử dụng", "lô"]):
-            selected_keys.append("6. Theo ngành - Nhà thuốc")
-        elif any(kw in q or kw in readme_lower for kw in ["cà phê", "cafe", "size ly", "topping"]):
-            selected_keys.append("6. Theo ngành - Cà phê")
-        elif any(kw in q or kw in readme_lower for kw in ["xi măng", "gạch", "vật liệu", "đợt giao", "chở giao"]):
-            selected_keys.append("6. Theo ngành - Vật liệu xây dựng")
+        # Mục 6: Theo ngành (Tìm động các tiểu mục ngành khớp với README hoặc câu hỏi, không hardcode)
+        industry_sections = [k for k in self.sections if k.startswith("6. Theo ngành - ")]
+        for ind_key in industry_sections:
+            ind_name = ind_key.replace("6. Theo ngành - ", "").strip()
+            ind_clean = strip_accents(ind_name)
+            # 1. So khớp tên ngành trực tiếp trong README hoặc câu hỏi
+            if ind_name.lower() in readme_lower or ind_clean in strip_accents(biz_readme) or ind_name.lower() in q:
+                selected_keys.append(ind_key)
+                continue
+            # 2. Hoặc so khớp từ khóa đặc trưng trong nội dung tiểu mục luật ngành đó
+            sec_content = self.sections.get(ind_key, "")
+            bold_terms = re.findall(r"\*\*([^\*]+)\*\*", sec_content)
+            keywords_in_sec = [t.lower().strip() for t in bold_terms if len(t.strip()) >= 3 and not t.strip().startswith("Mục")]
+            if any(term in q or term in readme_lower for term in keywords_in_sec):
+                selected_keys.append(ind_key)
 
-        # Tóm tắt cô đọng Mục 2 (Thời gian & Ranh giới) để tiết kiệm context window
+        # Tóm tắt cô đọng Mục 2 (Thời gian & Ranh giới) dựa trên núm đọc động từ rulebook
+        morning_str = f"{self.knobs.shift_morning[0]}–{self.knobs.shift_morning[1]}"
+        afternoon_str = f"{self.knobs.shift_afternoon[0]}–{self.knobs.shift_afternoon[1]}"
         compact_footer = (
-            "## Quy tắc Thời gian & Ranh giới (Mục 2):\n"
-            "- 'Quá N, hơn N, trên N, dưới N': không gồm N; 'Từ N trở lên, từ N trở xuống': gồm N.\n"
-            "- Ca sáng: 06:00–13:59, ca chiều: 14:00–21:59 (so ca chiều với ca sáng: mốc là ca sáng).\n"
-            "- Hỏi số còn lại ('tính đến hết ngày X', 'còn nợ', 'còn tồn'): tính mọi phát sinh từ đầu dữ liệu đến hết ngày đó."
+            f"## Quy tắc Thời gian & Ranh giới (Mục 2):\n"
+            f"- Tuần bắt đầu từ: {self.knobs.week_start_day}.\n"
+            f"- 'Quá N, hơn N, trên N, dưới N': không gồm N; 'Từ N trở lên, từ N trở xuống': gồm N.\n"
+            f"- Ca sáng: {morning_str}, ca chiều: {afternoon_str} (so ca chiều với ca sáng: mốc là ca sáng).\n"
+            f"- Hỏi số còn lại ('tính đến hết ngày X', 'còn nợ', 'còn tồn'): tính mọi phát sinh từ đầu dữ liệu đến hết ngày đó."
         )
 
         seen = set()
@@ -647,8 +735,8 @@ class DAILFewShotSelector:
         "-- Lưu ý: Ca sáng: 06:00-13:59:59; Ca chiều: 14:00-21:59:59. Mẫu số so sánh là Ca sáng:\n"
         "WITH shifts AS (\n"
         "  SELECT \n"
-        "    SUM(CASE WHEN CAST(strftime(try_strptime(\"Thời gian\", '%Y-%m-%d %H:%M:%S'), '%H') AS INT) BETWEEN 6 AND 13 THEN \"revenue_norm\" ELSE 0 END) AS sang,\n"
-        "    SUM(CASE WHEN CAST(strftime(try_strptime(\"Thời gian\", '%Y-%m-%d %H:%M:%S'), '%H') AS INT) BETWEEN 14 AND 21 THEN \"revenue_norm\" ELSE 0 END) AS chieu\n"
+        "    SUM(CASE WHEN hour(try_cast(\"Thời gian\" AS TIMESTAMP)) BETWEEN 6 AND 13 THEN \"revenue_norm\" ELSE 0 END) AS sang,\n"
+        "    SUM(CASE WHEN hour(try_cast(\"Thời gian\" AS TIMESTAMP)) BETWEEN 14 AND 21 THEN \"revenue_norm\" ELSE 0 END) AS chieu\n"
         "  FROM ban_hang\n"
         "  WHERE \"status_norm\" = 'Hoàn thành'\n"
         "    AND \"Thời gian\" >= '2025-12-01' AND \"Thời gian\" < '2026-01-01'\n"

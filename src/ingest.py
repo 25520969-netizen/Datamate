@@ -300,7 +300,7 @@ _VN_TEXT_DATE_RE = re.compile(
 )
 _EXCEL_SERIAL_RE = re.compile(r"^\d{5}(?:\.\d+)?$")
 _ISO_MIDNIGHT_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})[T\s]+00:00(?::00)?(?:\.0+)?$")
-CACHE_VERSION = "v7"
+CACHE_VERSION = "v8"
 
 
 def parse_vn_numeric_value(val: Any, is_qty_col: bool = False) -> Optional[float]:
@@ -986,6 +986,18 @@ class BusinessDataStore:
             )
             if st_found and "Trạng thái" not in df.columns:
                 df["Trạng thái"] = df[st_found]
+
+            if "Trạng thái" in df.columns and "status_norm" not in df.columns:
+                def _norm_status_val(v: Any) -> str:
+                    s = str(v).lower().strip()
+                    if any(k in s for k in ["hủy", "huỷ", "cancel"]):
+                        return "Đã hủy"
+                    if any(k in s for k in ["trả", "tra hang", "return"]):
+                        return "Trả hàng"
+                    if any(k in s for k in ["hoàn thành", "thành công", "xong", "đã lấy", "completed", "finish"]):
+                        return "Hoàn thành"
+                    return str(v)
+                df["status_norm"] = df["Trạng thái"].map(_norm_status_val)
 
             ord_col = next((c for c in df.columns if c in all_order_id_cols), None)
             if not ord_col:

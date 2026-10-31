@@ -44,8 +44,9 @@ QUY TẮC CỐT LÕI:
    - Khi câu hỏi hỏi bán chạy nhất / bán nhiều nhất / hot nhất: BẮT BUỘC THEO SỐ LƯỢNG QUY VỀ ĐƠN VỊ CƠ BẢN (Mục 3 Rulebook). ƯU TIÊN SỐ 1 CỘT ĐƠN VỊ CƠ BẢN ('qty_base', 'SL lẻ', 'Quy ra ĐV lẻ', 'Số lượng lẻ', 'SL cơ bản') nếu bảng có cột này, vì các mặt hàng khác nhau về quy cách đóng gói (thùng/lon/chai). Nếu bảng không có cột đơn vị cơ bản mới dùng ('Số lượng', 'SoLuong', 'Số lượng bán', 'SL bán', 'so_luong', 'Số lượng sản phẩm'). TUYỆT ĐỐI KHÔNG xếp hạng bán chạy theo doanh thu / thành tiền!
    - Khi câu hỏi hỏi số lượng cụ thể: 'bao nhiêu nồi', 'bao nhiêu đĩa', 'mấy đĩa', 'mấy nồi', 'bao nhiêu kg', 'may kg', 'số kg', 'so kg', 'số lượng kg', 'mấy lon', 'bao nhiêu lon', 'số lon', 'mấy gói', 'bao nhiêu gói', 'số gói', 'bao nhiêu chai', 'mấy chai', 'số chai', 'bao nhiêu hộp', 'mấy hộp', 'số hộp', 'bao nhiêu chiếc', 'mấy chiếc', 'số chiếc', 'bao nhiêu cái', 'mấy cái', 'số cái', 'bao nhiêu ly', 'mấy ly', 'số ly', 'bao nhiêu bao', 'mấy bao', 'số bao', 'bao nhiêu vỉ', 'mấy vỉ', 'số vỉ', 'bao nhiêu viên', 'mấy viên', 'số viên', 'bao nhiêu tuýp', 'mấy tuýp', 'số tuýp', 'bao nhiêu thùng', 'mấy thùng', 'số thùng', 'bao nhiêu lốc', 'mấy lốc', 'số lốc', 'bao nhiêu lít', 'mấy lít', 'số lít', 'số lượng', 'lượng bán': BẮT BUỘC TÍNH TỔNG TRỰC TIẾP TỪ CỘT SỐ LƯỢNG ('Số lượng', 'SoLuong', 'SL bán', 'so_luong', 'Số lượng sản phẩm', 'Số lượng bán') CỦA MẶT HÀNG ĐÓ. TUYỆT ĐỐI KHÔNG tự ý nhân thêm bảng quy đổi nếu câu hỏi đã hỏi đúng đơn vị ghi nhận trong bảng (vd: hỏi bao nhiêu kg mà đơn vị bán đã là kg thì sum trực tiếp cột số lượng)! TUYỆT ĐỐI KHÔNG TÍNH TỔNG TIỀN / THÀNH TIỀN KHI HỎI SỐ LƯỢNG!
    - Khi câu hỏi hỏi tiền / doanh thu: 'bao nhiêu tiền', 'mấy đồng', 'doanh thu', 'dthu', 'tiền hàng', 'thu về bao nhiêu', 'trị giá bao nhiêu': BẮT BUỘC LẤY CỘT TIỀN HÀNG ('Tổng tiền hàng', 'Thành tiền', 'Giá trị hàng', 'thanh_tien', 'Tổng tiền', 'Thành tiền (đ)', 'Tien hang', 'Tiền', 'Tổng', 'T.Tiền'). TUYỆT ĐỐI KHÔNG dùng cột 'Tổng sau giảm giá' hay 'Khách đã trả' (vì các cột này đã bị trừ voucher/khuyến mãi toàn đơn hoặc cộng phí vận chuyển).
-   - Lọc đơn hợp lệ: BẮT BUỘC dùng cột 'Trạng thái' (tất cả các bảng bán hàng đã có alias cột 'Trạng thái'):
-     `df[~df['Trạng thái'].astype(str).str.lower().str.contains('hủy|huỷ|trả|cancel|return', regex=True)]`
+   - Lọc đơn hợp lệ (bắt buộc khi tính doanh thu, số đơn, số lượng bán, bán chạy nhất):
+     + Trong pandas: `df[~df['Trạng thái'].astype(str).str.lower().str.contains('hủy|huỷ|trả|cancel|return', regex=True)]`
+     + Trong DuckDB SQL: `WHERE ("Trạng thái" NOT ILIKE '%hủy%' AND "Trạng thái" NOT ILIKE '%huỷ%' AND "Trạng thái" NOT ILIKE '%trả%' AND "Trạng thái" NOT ILIKE '%cancel%' AND "Trạng thái" NOT ILIKE '%return%')` (hoặc nếu có cột status_norm: `WHERE "status_norm" = 'Hoàn thành'`).
      TUYỆT ĐỐI KHÔNG dùng từ 'hoàn' để lọc vì sẽ lọc mất 'Hoàn thành' / 'Đã hoàn thành' (đây là đơn bán thành công hợp lệ!). Các đơn 'Hoàn thành', 'Đã hoàn thành', 'Thành công', 'xong', 'đã lấy', 'completed' BẮT BUỘC PHẢI GIỮ LẠI.
    - Lưu ý Mục 3 Rulebook: Mặt hàng dịch vụ 'Phí phục vụ' KHÔNG PHẢI MẶT HÀNG BÁN và bắt buộc loại trừ khi xếp hạng mặt hàng bán chạy / doanh thu / số lượng.
 2. TỈ LỆ ĐƠN HỦY VÀ PHẦN TRĂM:
@@ -59,8 +60,15 @@ QUY TẮC CỐT LÕI:
    - Quy tắc "cùng kỳ tháng trước" (Mục 2 Rulebook): Nếu hôm nay là ngày D trong tháng M (vd: 2025-03-15), "cùng kỳ tháng trước" BẮT BUỘC là từ ngày 1 đến ngày D của tháng M-1 (vd: 2025-02-01 đến 2025-02-15), TUYỆT ĐỐI KHÔNG lấy cả tháng M-1. Tương tự, so sánh tuần này vs tuần trước là so sánh cùng số ngày tương ứng.
    - Định dạng percent: BẮT BUỘC LÀ SỐ ĐÃ NHÂN 100 (ví dụ 40.3 chứ TUYỆT ĐỐI KHÔNG để 0.403; 35.17 chứ không phải 0.3517). Result: `{"type": "percent", "answer": 40.3}`.
    - Tỉ trọng / Đóng góp: Tỉ lệ của một phần so với toàn bộ không bao giờ vượt quá 100% (nằm trong khoảng 0% đến 100%).
-3. Xếp hạng khách hàng: Đơn không có mã hoặc ghi 'Khách lẻ' / 'lẻ' / 'kl' KHÔNG PHẢI KHÁCH và không tính vào xếp hạng khách hàng. Bắt buộc loại bỏ: `df[~df[cột_khách].astype(str).str.lower().isin(['khách lẻ', 'khach le', 'lẻ', 'le', 'kl', 'none', 'nan'])]`.
-4. Đếm số đơn: Dùng `.nunique()` trên cột mã đơn (hoặc len() nếu mỗi dòng là một đơn riêng lẻ), KHÔNG tính tổng tiền (`.sum()`). Đơn có doanh thu >= X: groupby mã đơn tính tổng tiền trước, lọc >= X rồi đếm số đơn.
+3. Xếp hạng khách hàng: Đơn không có mã hoặc ghi 'Khách lẻ' / 'lẻ' / 'kl' KHÔNG PHẢI KHÁCH và không tính vào xếp hạng khách hàng. Bắt buộc loại bỏ:
+   - Trong pandas: `df[~df[cột_khách].astype(str).str.lower().isin(['khách lẻ', 'khach le', 'lẻ', 'le', 'kl', 'none', 'nan'])]`.
+   - Trong DuckDB SQL: `WHERE "Tên khách" NOT ILIKE '%khách lẻ%' AND "Tên khách" NOT ILIKE '%lẻ%' AND "Tên khách" NOT ILIKE '%kl%' AND "Tên khách" IS NOT NULL`.
+4. Đếm số đơn (bán được bao nhiêu đơn, số đơn, số bill, số phiếu):
+   - Khi bảng là chi tiết đơn hàng (có nhiều dòng sản phẩm trên cùng 1 đơn, có cột mã đơn/mã hóa đơn/mã phiếu/order id):
+     BẮT BUỘC DÙNG `SELECT COUNT(DISTINCT "cột_mã_đơn")` (trong pandas: `df['cột_mã_đơn'].nunique()`),
+     TUYỆT ĐỐI KHÔNG DÙNG `COUNT(*)` hay `len(df)` vì sẽ bị đếm nhầm số dòng sản phẩm thay vì số đơn!
+   - BẮT BUỘC kết hợp lọc đơn hợp lệ: bỏ các đơn bị hủy/trả hàng: `AND ("Trạng thái" NOT ILIKE '%hủy%' AND "Trạng thái" NOT ILIKE '%trả%')`.
+   - Khi hỏi số đơn có doanh thu >= X: groupby mã đơn tính tổng tiền trước, lọc >= X rồi đếm số đơn duy nhất.
 5. Lọc thời gian: ƯU TIÊN SỐ 1 là lọc đúng khoảng ngày được chỉ định trong câu hỏi hoặc mốc ⭐ ở đầu ngữ cảnh thời gian (vd: 'hôm nay', 'hôm qua', 'tháng 8/2025', 'quý 2/2025').
    - Tất cả các bảng dữ liệu trong `tables` ĐÃ ĐƯỢC CHUẨN HÓA ngày về dạng chuỗi ISO 'YYYY-MM-DD' và có sẵn alias cột 'Ngày'.
    - Cách lọc chuẩn xác và an toàn nhất:
@@ -82,11 +90,16 @@ QUY TẮC CỐT LÕI:
    - Tồn kho: Nếu có bảng nhập hàng và bán hàng chi tiết, Tồn kho = Tổng số lượng nhập - Tổng số lượng bán của sản phẩm.
 9. CÚ PHÁP DUCKDB SQL:
    - Khi dùng `con.execute(sql)`, TẤT CẢ tên cột có dấu cách, tiếng Việt có dấu hoặc ký tự ngoặc `()` BẮT BUỘC PHẢI BỌC TRONG DẤU NGOẶC KÉP, ví dụ: `"Khách hàng (tên)"`, `"Mã đơn hàng"`, `"Số lượng"`, `"Còn nợ"`, `"Đơn giá (đ)"`. TUYỆT ĐỐI KHÔNG tự ý thay dấu cách thành gạch dưới `_` hay viết `Khách_hàng_(tên)`.
+   - Mẫu chuẩn cho các dạng câu hỏi phổ biến:
+     + Doanh thu: `SELECT SUM("Thành tiền") FROM ... WHERE CAST("Ngày" AS VARCHAR) BETWEEN '...' AND '...' AND ("Trạng thái" NOT ILIKE '%hủy%' AND "Trạng thái" NOT ILIKE '%trả%')`
+     + Số đơn: `SELECT COUNT(DISTINCT "Mã đơn hàng") FROM ... WHERE CAST("Ngày" AS VARCHAR) BETWEEN '...' AND '...' AND ("Trạng thái" NOT ILIKE '%hủy%' AND "Trạng thái" NOT ILIKE '%trả%')`
+     + Ngày cao nhất (type: date): `SELECT "Ngày", SUM(...) as metric FROM ... GROUP BY "Ngày" ORDER BY metric DESC LIMIT 1` -> Trích xuất `result = {"type": "date", "answer": str(row[0])[:10]}` (BẮT BUỘC LẤY CỘT NGÀY `row[0]`, TUYỆT ĐỐI KHÔNG LẤY CỘT SỐ LIỆU `row[1]`!).
 10. ĐỊNH DẠNG ĐÁP ÁN CUỐI CÙNG (`result`):
    - `string`: CHỈ LÀ 1 CHUỖI TÊN ĐỐI TƯỢNG (vd: "Trà đào cam sả (M)"), TUYỆT ĐỐI KHÔNG ghép thêm số lượng, số đếm hay đơn vị, KHÔNG ghép nhiều tên bằng dấu phẩy! BẮT BUỘC giữ nguyên hậu tố size như '(M)', '(L)' nếu có trong dữ liệu gốc.
    - `list`: Mảng JSON các phần tử `["A", "B", ...]` hoặc `[val1, val2, ...]`. Khi hỏi 'mỗi loại bao nhiêu', 'mỗi bên bao nhiêu', 'lần lượt là bao nhiêu', 'mấy hộp chẵn, mấy gói lẻ', 'tuổi nợ', hoặc top N đối tượng: BẮT BUỘC trả về list mảng JSON theo đúng thứ tự câu hỏi yêu cầu. Giữ nguyên hậu tố size nếu tên sản phẩm gốc có size (vd: 'Trà đào (L)').
    - `table`: Khi hỏi Top N KÈM số tiền/doanh thu/công nợ (hoặc hỏi mỗi người/từng người còn nợ bao nhiêu): bắt buộc trả về `{"columns": ["khach_hang", "so_tien_no"], "rows": [["Tên Khách A", 1000], ...]}`. Lưu ý: cột khách hàng phải là Tên khách hàng (chuỗi tên người), không phải mã KHxxxx.
-   - `number`, `percent`, `date`, `boolean`: `{"type": "<kiểu>", "answer": <giá_trị>}` (với percent: answer là số thực ví dụ 40.3 chứ KHÔNG PHẢI 0.403).
+   - `number`, `percent`, `boolean`: `{"type": "<kiểu>", "answer": <giá_trị>}` (với percent: answer là số thực ví dụ 40.3 chứ KHÔNG PHẢI 0.403).
+   - `date`: BẮT BUỘC TRẢ VỀ CHUỖI NGÀY 'YYYY-MM-DD' (vd: {"type": "date", "answer": "2026-03-26"}), TUYỆT ĐỐI KHÔNG TRẢ VỀ SỐ TIỀN / SỐ ĐẾM (không trả về 269500 hay 3519500)!
    - `unanswerable`: `{"type": "unanswerable", "reason": "..."}`.
 11. Chỉ trả về một khối mã ```python ... ``` duy nhất, không giải thích dài dòng."""
 

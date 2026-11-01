@@ -467,14 +467,20 @@ class DateResolver:
                 lines.append(f"  * {p['expr']}: từ '{p['start_date']}' đến '{p['end_date']}' ({p['note']})")
             lines.append("")
 
-        lines.extend([
-            f"- Hôm nay (`as_of_date`): {ctx['as_of_date']} (Mọi bản ghi có ngày > {ctx['as_of_date']} coi như chưa xảy ra, trừ trạng thái huỷ/trả ghi trên đơn).",
-            f"- Hôm qua: {ctx['yesterday'][0]}",
-            f"- Tuần này (Thứ Hai -> Hôm nay): {ctx['this_week'][0]} đến {ctx['this_week'][1]}",
-            f"- Tuần trước / tuần rồi (Thứ Hai -> Chủ Nhật): {ctx['last_week'][0]} đến {ctx['last_week'][1]}",
-            f"- Tháng này (đầu tháng -> Hôm nay): {ctx['this_month'][0]} đến {ctx['this_month'][1]}",
-            f"- Tháng trước (cả tháng): {ctx['prev_month_full'][0]} đến {ctx['prev_month_full'][1]}",
-            f"- Kỳ 'so với tháng trước' (khi so với 'tháng này' - cùng số ngày): {ctx['prev_month_same_days'][0]} đến {ctx['prev_month_same_days'][1]}",
-            f"- Từ đầu năm tới nay: {ctx['ytd'][0]} đến {ctx['ytd'][1]}",
-        ])
+        lines.append(f"- Hôm nay (`as_of_date`): {ctx['as_of_date']} (Mọi bản ghi có ngày > {ctx['as_of_date']} coi như chưa xảy ra, trừ trạng thái huỷ/trả ghi trên đơn).")
+
+        # Khử nhiễu: Nếu câu hỏi đã xác định được mốc mục tiêu cụ thể và không phải là câu hỏi so sánh tương đối giữa 2 kỳ,
+        # ẩn bớt các mốc tham chiếu khác (tuần này, tháng trước, YTD...) để tránh LLM bị loãng chú ý và lọc nhầm khoảng thời gian.
+        q_low = question.lower()
+        is_comparative = any(k in q_low for k in ["so với", "so vs", "cùng kỳ", "cung ky", "hơn hay kém", "hon hay kem", "tăng hay giảm", "tang hay giam", "chênh", "chenh"])
+        if not ctx["detected_periods"] or is_comparative:
+            lines.extend([
+                f"- Hôm qua: {ctx['yesterday'][0]}",
+                f"- Tuần này (Thứ Hai -> Hôm nay): {ctx['this_week'][0]} đến {ctx['this_week'][1]}",
+                f"- Tuần trước / tuần rồi (Thứ Hai -> Chủ Nhật): {ctx['last_week'][0]} đến {ctx['last_week'][1]}",
+                f"- Tháng này (đầu tháng -> Hôm nay): {ctx['this_month'][0]} đến {ctx['this_month'][1]}",
+                f"- Tháng trước (cả tháng): {ctx['prev_month_full'][0]} đến {ctx['prev_month_full'][1]}",
+                f"- Kỳ 'so với tháng trước' (khi so với 'tháng này' - cùng số ngày): {ctx['prev_month_same_days'][0]} đến {ctx['prev_month_same_days'][1]}",
+                f"- Từ đầu năm tới nay: {ctx['ytd'][0]} đến {ctx['ytd'][1]}",
+            ])
         return "\n".join(lines)

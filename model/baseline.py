@@ -71,14 +71,13 @@ QUY TẮC CỐT LÕI (DUCKDB SQL):
 # PROMPT 2: Tư duy Phòng thủ từng bước với DuckDB CTE (Defensive CTE Engine)
 # -----------------------------------------------------------------------------
 SYSTEM_PROMPT_DEFENSIVE_SQL = """Bạn là Chuyên gia Khoa học Dữ liệu chú trọng tính chính xác và kiểm soát rủi ro biên (DataMate 2026).
-Nhiệm vụ: Viết một đoạn mã Python sử dụng kết nối DuckDB `con` với kỹ thuật Common Table Expressions (WITH ... AS ...) để bóc tách bài toán thành từng bước phòng thủ chặt chẽ.
+Nhiệm vụ: Viết một đoạn mã Python truy vấn dữ liệu từ kết nối DuckDB `con` độc lập để trả lời câu hỏi.
 
-QUY TẮC CỐT LÕI (DEFENSIVE CTE DUCKDB RELATIONAL):
+QUY TẮC CỐT LÕI (DEFENSIVE VERIFICATION DUCKDB ENGINE):
 1. Tổ chức truy vấn kiểm soát dữ liệu chặt chẽ:
-   - CTE 1 (valid_orders): Lọc đơn hàng hợp lệ theo ngày và loại bỏ đơn 'Đã hủy', 'Trả hàng' (CHÚ Ý: nếu tính tỉ lệ hủy đơn thì giữ lại đơn hủy để đếm). BẮT BUỘC dùng `SELECT * FROM ... WHERE ...` để giữ lại toàn bộ các cột phục vụ cho các bước JOIN và GROUP BY phía sau, tuyệt đối không liệt kê thiếu cột gây lỗi Binder Error.
-   - CTE 2 (filtered_data): Nếu câu hỏi cần thêm thông tin từ bảng thứ hai (chi tiết hàng hoặc danh mục), ghép nối theo khóa ngoại (`Mã đơn hàng`, `Mã sản phẩm`). TUYỆT ĐỐI KHÔNG tự ý JOIN bảng với chính nó hoặc JOIN thừa thãi khi câu hỏi chỉ cần dữ liệu từ 1 bảng duy nhất (như bảng bán hàng hoặc bảng hóa đơn), vì JOIN thừa sẽ nhân bản dòng dữ liệu (Cartesian product) làm sai lệch nghiêm trọng kết quả tính toán!
-   - CTE 3 (aggregated): Nhóm và tính toán tổng tiền, số lượng (`qty_base`), hoặc tỉ trọng.
-   - Hoàn toàn có thể viết trực tiếp câu lệnh SELECT duy nhất nếu truy vấn đơn giản hoặc đơn bảng, không bắt buộc phải tách nhiều CTE.
+   - Ưu tiên viết truy vấn trực tiếp, đơn giản và sạch sẽ. Có thể dùng CTE (WITH ... AS ...) nếu bài toán có nhiều bước tính phức tạp.
+   - TUYỆT ĐỐI KHÔNG tự ý JOIN bảng chi tiết với bảng hóa đơn khi câu hỏi chỉ cần dữ liệu từ 1 bảng duy nhất (như bảng bán hàng hoặc bảng hóa đơn), vì JOIN thừa sẽ nhân bản dòng dữ liệu (Cartesian product) làm sai lệch nghiêm trọng kết quả tính toán!
+   - Tỉ lệ đơn hủy: KHÔNG được lọc bỏ đơn hủy trước khi tính (tuyệt đối không dùng `WHERE "Trạng thái" NOT IN ('Đã hủy')` làm mất đơn hủy). Công thức chuẩn: `COUNT(DISTINCT CASE WHEN "status_norm" = 'Đã hủy' THEN "Mã đơn hàng" END) * 100.0 / NULLIF(COUNT(DISTINCT "Mã đơn hàng"), 0)`.
 2. Quy tắc an toàn bắt buộc:
    - Dữ liệu đã nạp sẵn trong kết nối `con` (DuckDB) và `tables` (Pandas), TUYỆT ĐỐI KHÔNG gọi `duckdb.connect(...)` hoặc mở file mới.
    - Tuyệt đối KHÔNG viết comment (# ...) trong code Python, chỉ viết trực tiếp các lệnh thực thi.
@@ -125,7 +124,7 @@ class QwenCoderClient:
         api_base: Optional[str] = None,
         api_key: Optional[str] = None,
         temperature: float = 0.0,
-        max_tokens: int = 512,
+        max_tokens: int = 768,
         request_timeout: float = 90.0,
         custom_generator: Optional[Callable[[List[Dict[str, str]]], str]] = None,
     ) -> None:
@@ -469,7 +468,8 @@ class DataMateAgent:
         """
         qid = question_obj["id"]
         business_id = question_obj["business_id"]
-        question = question_obj["question"]
+        question = self.rule_engine.normalize_telex_typos(question_obj["question"])
+        question_obj["question"] = question
         as_of_date = question_obj["as_of_date"]
 
         try:
@@ -625,7 +625,32 @@ class DataMateAgent:
         decision_reason = ""
         final_pred = {"id": qid, "type": "abstain"}
 
-        if p1_valid and p2_valid:
+        p1_code_str = str(code1 or "")
+        p2_code_str = str(code2 or "")
+        q_low = question.lower()
+
+        # Tiền kiểm tra: Trọng tài Khách lẻ vs Tên người thật (Identified Customer Arbitration)
+        # Nếu câu hỏi hỏi khách chi tiêu/mua nhiều nhất, một bên ra tên người cụ thể (>= 2 từ tiếng Việt)
+        # trong khi bên kia ra 'Khách lẻ' / 'khách vãng lai' (kể cả khi đã bị Sanity Guard chặn thành abstain)
+        is_top_cust_q = any(k in q_low for k in ["mua nhìu tiền", "mua nhiều tiền", "chi nhiều tiền", "chi tieu nhieu", "khách nào", "ai mua", "khach nao", "ai chi"])
+        raw1_ans = str(raw1.get("answer", "") if isinstance(raw1, dict) else "").strip().lower()
+        raw2_ans = str(raw2.get("answer", "") if isinstance(raw2, dict) else "").strip().lower()
+        p1_is_kl = "khách lẻ" in raw1_ans or "khach le" in raw1_ans or raw1_ans == "lẻ"
+        p2_is_kl = "khách lẻ" in raw2_ans or "khach le" in raw2_ans or raw2_ans == "lẻ"
+
+        if is_top_cust_q and (p1_is_kl or p2_is_kl):
+            if p2_is_kl and p1_valid and pred1.get("type") == "string":
+                is_consensus = False
+                final_pred = pred1
+                decision_reason = "retail_customer_arbitration_p1"
+            elif p1_is_kl and p2_valid and pred2.get("type") == "string":
+                is_consensus = False
+                final_pred = pred2
+                decision_reason = "retail_customer_arbitration_p2"
+
+        if final_pred.get("type") != "abstain":
+            pass
+        elif p1_valid and p2_valid:
             # Cả hai bên đều ra đáp án -> Bắt buộc kiểm tra đồng thuận
             if check_consensus(pred1, pred2):
                 is_consensus = True
@@ -638,25 +663,64 @@ class DataMateAgent:
                 decision_reason = "consensus_match"
             else:
                 # Query-Feature Arbitration (Paper Lee & Lee 2024 / Borchmann 2025):
-                # Khi câu hỏi hỏi số lượng đơn hàng, nếu P1 dùng COUNT(DISTINCT ...) để chống nhân đôi dòng
+                # 1. Khi câu hỏi hỏi số lượng đơn hàng, nếu P1 dùng COUNT(DISTINCT ...) để chống nhân đôi dòng
                 # từ bảng chi tiết trong khi P2 dùng COUNT(*) đơn thuần -> Ưu tiên P1 với độ tin cậy tuyệt đối.
-                p1_code_str = str(code1 or "")
-                p2_code_str = str(code2 or "")
-                q_low = question.lower()
                 is_order_cnt_q = any(k in q_low for k in ["mấy đơn", "may don", "nhiêu đơn", "nhieu don", "bao nhiêu đơn", "bao nhiu don", "bn đơn", "bn don", "số đơn", "so don", "mấy hóa đơn", "mấy phiếu", "mấy gd"])
                 p1_has_distinct = "COUNT(DISTINCT" in p1_code_str.upper()
                 p2_has_distinct = "COUNT(DISTINCT" in p2_code_str.upper()
+
+                # 2. Trọng tài Tỉ lệ đơn hủy (Cancellation Rate Arbitration):
+                # Khi câu hỏi hỏi tỉ lệ hủy đơn, nếu một bên ra 0.0% do lọc WHERE 'Đã hủy' ở CTE valid_orders,
+                # trong khi bên kia tính đúng tỉ lệ thực tế (0 < rate <= 50.0%) -> Ưu tiên bên có tỉ lệ thực tế.
+                is_cancel_rate_q = any(k in q_low for k in ["đơn huỷ", "đơn hủy", "huỷ đơn", "hủy đơn"]) and any(k in q_low for k in ["tỉ lệ", "tỷ lệ", "%", "phần trăm", "bn %"])
+                p1_rate = pred1.get("answer") if pred1.get("type") == "percent" else None
+                p2_rate = pred2.get("answer") if pred2.get("type") == "percent" else None
+
+                # 3. Trọng tài Doanh thu bảng Master vs Detail Bloat (Master-Detail Join Bloat Arbitration):
+                # Khi hỏi doanh thu, nếu P2 JOIN bảng Hóa đơn với Hóa đơn Chi tiết dẫn tới số tiền bị nhân đôi dòng >= 1.4 lần P1,
+                # trong khi P1 truy vấn trực tiếp từ bảng Hóa đơn master -> Ưu tiên P1.
+                is_revenue_q = any(k in q_low for k in ["doanh thu", "dthu", "tiền", "tổng dthu", "tổng cộng bao nhiêu tiền", "doanh số"]) and not any(k in q_low for k in ["kho", "tồn"])
+                p1_num = pred1.get("answer") if pred1.get("type") == "number" else None
+                p2_num = pred2.get("answer") if pred2.get("type") == "number" else None
 
                 if pred1.get("type") == "number" and is_order_cnt_q and p1_has_distinct and not p2_has_distinct:
                     is_consensus = False
                     final_pred = pred1
                     decision_reason = "p1_distinct_semantic_arbitration"
+                elif is_cancel_rate_q and (p2_rate == 0.0 or p2_rate is None) and isinstance(p1_rate, (int, float)) and 0 < float(p1_rate) <= 50.0:
+                    is_consensus = False
+                    final_pred = pred1
+                    decision_reason = "p1_cancel_rate_arbitration"
+                elif is_cancel_rate_q and (p1_rate == 0.0 or p1_rate is None) and isinstance(p2_rate, (int, float)) and 0 < float(p2_rate) <= 50.0:
+                    is_consensus = False
+                    final_pred = pred2
+                    decision_reason = "p2_cancel_rate_arbitration"
+                elif is_revenue_q and isinstance(p1_num, (int, float)) and isinstance(p2_num, (int, float)) and p2_num >= 1.4 * p1_num and ("DanhSachHoaDonChiTiet" in p2_code_str and "DanhSachHoaDon" in p2_code_str):
+                    is_consensus = False
+                    final_pred = pred1
+                    decision_reason = "p1_revenue_master_arbitration"
+                elif expected_type == "percent" and pred1.get("type") == "percent" and pred2.get("type") == "number":
+                    is_consensus = False
+                    final_pred = pred1
+                    decision_reason = "type_priority_arbitration_p1"
+                elif expected_type == "percent" and pred2.get("type") == "percent" and pred1.get("type") == "number":
+                    is_consensus = False
+                    final_pred = pred2
+                    decision_reason = "type_priority_arbitration_p2"
                 else:
                     is_consensus = False
                     final_pred = {"id": qid, "type": "abstain"}
                     decision_reason = "consensus_disagreement_abstain"
         elif p1_valid and not p2_valid:
-            if self.arbitration_strategy == "adaptive":
+            # Kiểm tra trường hợp đặc biệt: P2 bị guard chặn tỉ lệ hủy = 0.0%
+            is_cancel_rate_q = any(k in q_low for k in ["đơn huỷ", "đơn hủy", "huỷ đơn", "hủy đơn"]) and any(k in q_low for k in ["tỉ lệ", "tỷ lệ", "%", "phần trăm", "bn %"])
+            p1_rate = pred1.get("answer") if pred1.get("type") == "percent" else None
+            p2_raw_ans = raw2.get("answer") if isinstance(raw2, dict) else None
+            if is_cancel_rate_q and (p2_raw_ans == 0.0 or p2_raw_ans is None) and isinstance(p1_rate, (int, float)) and 0 < float(p1_rate) <= 50.0:
+                is_consensus = False
+                final_pred = pred1
+                decision_reason = "p1_cancel_rate_guard_arbitration"
+            elif self.arbitration_strategy == "adaptive":
                 # Prompt 1 (SQL) vượt qua toàn bộ guard an toàn, Prompt 2 lỗi kỹ thuật -> Giữ Prompt 1
                 is_consensus = False
                 final_pred = pred1
@@ -665,11 +729,16 @@ class DataMateAgent:
                 final_pred = {"id": qid, "type": "abstain"}
                 decision_reason = "strict_requires_both"
         elif p2_valid and not p1_valid:
-            # Prompt 1 (SQL) thất bại là tín hiệu cảnh báo rủi ro cao:
-            # Dữ liệu thực nghiệm 300 câu chứng minh p2_valid_p1_failed chỉ đạt 29.5% độ chính xác
-            # (13 đúng, 31 sai, âm 18 điểm). Do đó, từ chối fallback này và abstain an toàn để bảo vệ điểm.
-            final_pred = {"id": qid, "type": "abstain"}
-            decision_reason = "p2_only_rejected_abstain"
+            is_cancel_rate_q = any(k in q_low for k in ["đơn huỷ", "đơn hủy", "huỷ đơn", "hủy đơn"]) and any(k in q_low for k in ["tỉ lệ", "tỷ lệ", "%", "phần trăm", "bn %"])
+            p2_rate = pred2.get("answer") if pred2.get("type") == "percent" else None
+            p1_raw_ans = raw1.get("answer") if isinstance(raw1, dict) else None
+            if is_cancel_rate_q and (p1_raw_ans == 0.0 or p1_raw_ans is None) and isinstance(p2_rate, (int, float)) and 0 < float(p2_rate) <= 50.0:
+                is_consensus = False
+                final_pred = pred2
+                decision_reason = "p2_cancel_rate_guard_arbitration"
+            else:
+                final_pred = {"id": qid, "type": "abstain"}
+                decision_reason = "p2_only_rejected_abstain"
         else:
             final_pred = {"id": qid, "type": "abstain"}
             decision_reason = "both_failed"

@@ -611,7 +611,7 @@ def apply_rulebook_section8_cleaning(df: pd.DataFrame) -> pd.DataFrame:
 
             # Phát hiện thêm các dòng footer / subtotal tự do không có từ khóa "tổng/cộng"
             # (Ví dụ: dòng 90850 dev_001 có Thành tiền 10,104,800 nhưng Ngày, Tên hàng, Khách hàng đều là NA)
-            dim_keywords = ("ngày", "ngay", "thời gian", "tên hàng", "sản phẩm", "hàng hóa", "khách hàng", "khách", "mặt hàng")
+            dim_keywords = ("ngày", "ngay", "thời gian", "tên", "ten", "sản phẩm", "hàng hóa", "khách hàng", "khách", "mặt hàng", "món", "nội dung")
             present_dims = [c for c in df.columns if c != order_col and any(k in c.lower() for k in dim_keywords) and not c.startswith("_")]
             if present_dims:
                 all_dims_na = df[present_dims].isna().all(axis=1) | df[present_dims].astype(str).isin(["", "None", "nan", "<NA>"]).all(axis=1)
@@ -627,7 +627,7 @@ def apply_rulebook_section8_cleaning(df: pd.DataFrame) -> pd.DataFrame:
         # Gán trạng thái 'Subtotal' cho các dòng subtotal nếu bảng có cột trạng thái
         if is_subtotal.any():
             for status_c in df.columns:
-                if status_c.lower() in ORDER_STATUS_COL_NAMES or any(status_c.lower().startswith(p) for p in ["trạng thái", "trang thai", "tt đơn"]):
+                if status_c.lower() in ORDER_STATUS_COL_NAMES or any(status_c.lower().startswith(p) for p in ["trạng thái", "trang thai", "tt đơn", "status"]):
                     if df[status_c].dtype != object:
                         df[status_c] = df[status_c].astype(object)
                     df.loc[is_subtotal, status_c] = "Subtotal"
@@ -649,7 +649,7 @@ def apply_rulebook_section8_cleaning(df: pd.DataFrame) -> pd.DataFrame:
             # Loại bỏ hai dòng của cùng một đơn giống nhau ở mọi ô (chỉ áp dụng cho các dòng thuộc về một đơn hàng)
             data_cols = [c for c in df.columns if not c.startswith("_")]
             order_rows = df[df[order_col].notna() & ~is_subtotal].drop_duplicates(subset=data_cols, keep="first")
-            no_order_rows = df[df[order_col].isna() & ~is_subtotal]
+            no_order_rows = df[df[order_col].isna()]
             df = pd.concat([order_rows, no_order_rows]).sort_index().reset_index(drop=True)
         elif is_subtotal.any():
             df = df[~is_subtotal].reset_index(drop=True)
@@ -1697,7 +1697,60 @@ class BusinessDataStore:
             )
             by_cols.setdefault(cols_key, []).append((tbl_name, df))
 
-        for cols_key, grp in by_cols.items():
+        # Khử nhiễu: Khi shop có nhiều bảng (> 5 nhóm), chỉ hiển thị chi tiết các bảng liên quan tới câu hỏi
+        # để tránh làm loãng attention và giảm 50-60% tokens vô ích cho LLM.
+        items_to_render = list(by_cols.items())
+        omitted_table_names: List[str] = []
+        if len(items_to_render) > 5 and question:
+            q_low = question.lower()
+            q_words = [w for w in re.split(r"\W+", q_low) if len(w) >= 2]
+
+            def _score_grp(item: Tuple[Tuple[str, ...], List[Tuple[str, pd.DataFrame]]]) -> int:
+                c_key, grp_list = item
+                names = [g[0] for g in grp_list]
+                names_str = " ".join(names).lower()
+                cols_str = " ".join(c_key).lower()
+                sc = 0
+                # 1. Bán hàng & Doanh thu cốt lõi
+                if any(k in names_str for k in ["bán", "ban_hang", "hóa đơn", "hoa_don", "đơn hàng", "don_hang", "donhang", "so_chi_tiet", "sobanhang"]):
+                    sc += 30
+                elif any(k in cols_str for k in ["thành tiền", "thanh tien", "mã đơn", "ma don"]):
+                    sc += 20
+                # 2. Công nợ & Sổ quỹ & Thanh toán
+                if any(k in q_low for k in ["nợ", "công nợ", "cong no", "trả nợ", "thu nợ", "thanh toán", "sổ quỹ", "so_quy"]):
+                    if any(k in names_str or k in cols_str for k in ["nợ", "thanh_toan", "cong_no", "so_quy", "thu", "chi"]):
+                        sc += 40
+                # 3. Tồn kho & Nhập hàng
+                if any(k in q_low for k in ["tồn", "ton ", "kho", "nhập", "nhap", "hết hàng", "lô", "hạn dùng", "hsd", "hạn"]):
+                    if any(k in names_str or k in cols_str for k in ["the_kho", "ton_kho", "phieu_nhap", "chi_tiet_nhap", "kho", "tồn", "lo_hang"]):
+                        sc += 40
+                # 4. Khách hàng
+                if any(k in q_low for k in ["khách", "khach", "người mua", "ai mua"]):
+                    if any(k in names_str or k in cols_str for k in ["khách", "khach"]):
+                        sc += 30
+                # 5. Khớp từ vựng câu hỏi
+                for w in q_words:
+                    if w in names_str:
+                        sc += 15
+                    elif w in cols_str:
+                        sc += 5
+                return sc
+
+            scored_grps = sorted(items_to_render, key=_score_grp, reverse=True)
+            # Giữ tối thiểu 3 nhóm, tối đa 5 nhóm có điểm >= 20
+            kept_grps = [it for it in scored_grps if _score_grp(it) >= 20]
+            if len(kept_grps) < 3:
+                kept_grps = scored_grps[:3]
+            elif len(kept_grps) > 5:
+                kept_grps = kept_grps[:5]
+
+            kept_keys = {it[0] for it in kept_grps}
+            items_to_render = [it for it in items_to_render if it[0] in kept_keys]
+            for it in scored_grps:
+                if it[0] not in kept_keys:
+                    omitted_table_names.extend([g[0] for g in it[1]])
+
+        for cols_key, grp in items_to_render:
             tbl_names = [g[0] for g in grp]
             rep_df = grp[0][1]
 
@@ -1722,5 +1775,9 @@ class BusinessDataStore:
                     if len(row_json) > 350:
                         row_json = row_json[:347] + "..."
                     lines.append(f"  -- Mẫu: {row_json}")
+
+        if omitted_table_names:
+            omitted_desc = ", ".join(f'"{t}"' for t in omitted_table_names)
+            lines.append(f"\n/* Các bảng phụ khác ({omitted_desc}) đã nạp sẵn trong kết nối `con`, có thể SELECT nếu cần. */")
 
         return "\n".join(lines)

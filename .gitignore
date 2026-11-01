@@ -3,6 +3,7 @@ train/data/
 public_test/data/
 train_preprocessed/
 train_preprocessed_full/
+public_test_preprocessed/
 .cache/
 .pytest_cache/
 .venv/

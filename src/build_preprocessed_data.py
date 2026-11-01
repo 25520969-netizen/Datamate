@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Script xây dựng toàn diện bộ dữ liệu train_preprocessed_full (Chuẩn hóa 30 shop).
+Script xây dựng toàn diện bộ dữ liệu preprocessed (Chuẩn hóa cho Train, Public Test, Custom).
 Khắc phục 100% lỗi cắt cụt 3.25 MB:
 - Xuất toàn bộ 100% số dòng cho tất cả các bảng.
 - Chuẩn hóa ngày tháng ISO YYYY-MM-DD.
@@ -11,6 +11,7 @@ Khắc phục 100% lỗi cắt cụt 3.25 MB:
 - Tạo _columns.csv, _build.csv, samples/ và report.csv chuẩn xác.
 """
 
+import argparse
 import csv
 import json
 import os
@@ -134,11 +135,11 @@ def build_columns_profile(table_name: str, df: pd.DataFrame) -> List[Dict[str, A
 def process_single_shop(
     business_id: str,
     raw_data_dir: Path,
-    meta_src_dir: Path,
+    meta_src_dir: Optional[Path],
     out_dir: Path,
     store: BusinessDataStore,
 ) -> Dict[str, Any]:
-    """Xử lý toàn bộ dữ liệu của một shop và xuất ra chuẩn train_preprocessed_full."""
+    """Xử lý toàn bộ dữ liệu của một shop và xuất ra chuẩn preprocessed_full."""
     t0 = time.time()
     shop_dir = out_dir / business_id
     shop_dir.mkdir(parents=True, exist_ok=True)
@@ -147,15 +148,27 @@ def process_single_shop(
     samples_dir = shop_dir / "samples"
     samples_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Sao chép metadata từ train_preprocessed (nếu có)
-    src_shop_meta = meta_src_dir / business_id
-    for meta_file in ["_mapping.csv", "_readme.txt", "_dropped.csv"]:
-        src_f = src_shop_meta / meta_file
-        if src_f.exists():
-            shutil.copy(str(src_f), str(shop_dir / meta_file))
+    # 1. Sao chép metadata từ meta_src_dir (nếu có)
+    if meta_src_dir and meta_src_dir.exists():
+        src_shop_meta = meta_src_dir / business_id
+        if src_shop_meta.exists():
+            for meta_file in ["_mapping.csv", "_readme.txt", "_dropped.csv"]:
+                src_f = src_shop_meta / meta_file
+                if src_f.exists():
+                    shutil.copy(str(src_f), str(shop_dir / meta_file))
+
+    # Đảm bảo luôn có _readme.txt trong shop_dir (từ meta, hoặc từ README.md ở raw_dir)
+    readme_path = shop_dir / "_readme.txt"
+    if not readme_path.exists():
+        raw_readme = raw_data_dir / business_id / "README.md"
+        if raw_readme.exists():
+            shutil.copy(str(raw_readme), str(readme_path))
+        else:
+            txt = store.get_readme(business_id)
+            if txt:
+                readme_path.write_text(txt, encoding="utf-8")
 
     # Đọc quy tắc quy đổi từ _readme.txt
-    readme_path = shop_dir / "_readme.txt"
     readme_text = readme_path.read_text(encoding="utf-8") if readme_path.exists() else store.get_readme(business_id)
     readme_conversions = parse_readme_conversions(readme_text)
 
@@ -175,6 +188,7 @@ def process_single_shop(
     # 3. Chuẩn hóa & Tính toán qty_base cho từng bảng
     build_rows: List[Dict[str, Any]] = []
     all_column_profiles: List[Dict[str, Any]] = []
+    processed_dfs: Dict[str, pd.DataFrame] = {}
     total_shop_rows = 0
 
     for tname, df in tables.items():
@@ -259,6 +273,7 @@ def process_single_shop(
         # 4. Ghi file CSV đầy đủ 100% dòng và file samples (300 dòng)
         csv_file = tables_dir / f"{tname}.csv"
         out_df.to_csv(csv_file, index=False, encoding="utf-8")
+        processed_dfs[tname] = out_df
 
         sample_file = samples_dir / f"{tname}.csv"
         out_df.head(300).to_csv(sample_file, index=False, encoding="utf-8")
@@ -300,7 +315,12 @@ def process_single_shop(
     for tname in tables.keys():
         t_csv = tables_dir / f"{tname}.csv"
         # Đọc trực tiếp từ file CSV đã chuẩn hóa vào DuckDB
-        con.execute(f"CREATE TABLE \"{tname}\" AS SELECT * FROM read_csv_auto('{str(t_csv)}')")
+        try:
+            con.execute(f"CREATE TABLE \"{tname}\" AS SELECT * FROM read_csv_auto('{str(t_csv)}')")
+        except Exception:
+            con.register("_tmp_df", processed_dfs[tname])
+            con.execute(f"CREATE TABLE \"{tname}\" AS SELECT * FROM _tmp_df")
+            con.unregister("_tmp_df")
     con.execute("CHECKPOINT")
     con.close()
 
@@ -325,22 +345,81 @@ def process_single_shop(
 
 
 def main() -> None:
-    print("=" * 70)
-    print("🚀 BẮT ĐẦU XÂY DỰNG TOÀN BỘ DATA TRAIN_PREPROCESSED_FULL (30 SHOPS)")
-    print("=" * 70)
+    parser = argparse.ArgumentParser(
+        description="DataMate Dataset Preprocessor & Standardizer (Supports Train, Public Test, and Custom Datasets)"
+    )
+    parser.add_argument(
+        "--dataset",
+        choices=["train", "public_test", "custom"],
+        default="public_test",
+        help="Chọn bộ dữ liệu cần tiền xử lý ('train', 'public_test', hoặc 'custom'). Mặc định: public_test",
+    )
+    parser.add_argument(
+        "--raw-dir",
+        type=str,
+        default=None,
+        help="Đường dẫn thư mục dữ liệu thô (mặc định: tự động xác định theo --dataset)",
+    )
+    parser.add_argument(
+        "--meta-dir",
+        type=str,
+        default=None,
+        help="Đường dẫn thư mục metadata bổ sung (nếu có)",
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=str,
+        default=None,
+        help="Đường dẫn thư mục đích lưu dữ liệu đã chuẩn hóa",
+    )
+    parser.add_argument(
+        "--shops",
+        nargs="*",
+        default=None,
+        help="Danh sách mã shop cần xử lý (nếu không truyền, tự động quét toàn bộ shop)",
+    )
+    args = parser.parse_args()
 
-    raw_dir = PROJECT_ROOT / "train" / "data"
-    meta_dir = PROJECT_ROOT / "train_preprocessed"
-    out_dir = PROJECT_ROOT / "train_preprocessed_full"
+    if args.dataset == "public_test":
+        raw_dir = Path(args.raw_dir) if args.raw_dir else PROJECT_ROOT / "public_test" / "data"
+        out_dir = Path(args.out_dir) if args.out_dir else PROJECT_ROOT / "public_test_preprocessed"
+        meta_dir = Path(args.meta_dir) if args.meta_dir else None
+    elif args.dataset == "train":
+        raw_dir = Path(args.raw_dir) if args.raw_dir else PROJECT_ROOT / "train" / "data"
+        out_dir = Path(args.out_dir) if args.out_dir else PROJECT_ROOT / "train_preprocessed_full"
+        meta_dir = Path(args.meta_dir) if args.meta_dir else PROJECT_ROOT / "train_preprocessed"
+    else:
+        if not args.raw_dir or not args.out_dir:
+            raise ValueError("Khi dùng --dataset custom, bắt buộc phải truyền cả --raw-dir và --out-dir!")
+        raw_dir = Path(args.raw_dir)
+        out_dir = Path(args.out_dir)
+        meta_dir = Path(args.meta_dir) if args.meta_dir else None
+
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    store = BusinessDataStore(data_root=raw_dir)
-    shops = [f"biz_{i:03d}" for i in range(101, 131)]
+    if not raw_dir.exists():
+        raise FileNotFoundError(f"Thư mục dữ liệu nguồn không tồn tại: {raw_dir}")
 
+    # Tự động quét danh sách shop nếu người dùng không truyền cụ thể
+    if args.shops:
+        shops = args.shops
+    else:
+        shops = sorted([
+            d.name for d in raw_dir.iterdir()
+            if d.is_dir() and not d.name.startswith((".", "_"))
+        ])
+
+    print("=" * 70)
+    print(f"🚀 BẮT ĐẦU XÂY DỰNG DỮ LIỆU PREPROCESSED ({len(shops)} SHOPS)")
+    print(f"   📂 Dữ liệu nguồn: {raw_dir}")
+    print(f"   💾 Thư mục đích:  {out_dir}")
+    print("=" * 70)
+
+    store = BusinessDataStore(data_root=raw_dir)
     summary_reports: List[Dict[str, Any]] = []
 
     for idx, shop in enumerate(shops):
-        print(f"[{idx+1}/30] Đang xử lý {shop}...", end=" ", flush=True)
+        print(f"[{idx+1}/{len(shops)}] Đang xử lý {shop}...", end=" ", flush=True)
         res = process_single_shop(
             business_id=shop,
             raw_data_dir=raw_dir,
@@ -348,7 +427,7 @@ def main() -> None:
             out_dir=out_dir,
             store=store,
         )
-        print(f"✅ Xong {res.get('tables')} bảng ({res.get('rows'):,} dòng) trong {res.get('seconds')}s")
+        print(f"✅ Xong {res.get('tables')} bảng ({res.get('rows', 0):,} dòng) trong {res.get('seconds', 0)}s")
         summary_reports.append(res)
 
     # Ghi file report.csv tổng quan

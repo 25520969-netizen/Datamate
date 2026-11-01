@@ -534,6 +534,11 @@ def postprocess_and_guard(
         if not clean_rows:
             return abstain_resp
 
+        # Chuẩn hóa tên cột bảng công nợ khớp với Rulebook Mục 9 nếu đang dùng nhãn tạm col_1, col_2
+        if len(clean_cols) == 2 and any(clean_cols[0].lower().startswith(prefix) for prefix in ("col_", "cột")):
+            if any(k in question.lower() for k in ("nợ", "công nợ")):
+                clean_cols = ["khach_hang", "so_tien_no"]
+
         return {
             "id": question_id,
             "type": "table",
@@ -714,20 +719,34 @@ def check_consensus(pred1: Dict[str, Any], pred2: Dict[str, Any]) -> bool:
         r2 = a2.get("rows")
         if not isinstance(r1, list) or not isinstance(r2, list):
             return False
-        if len(r1) != len(r2):
+        if len(r1) != len(r2) or len(r1) == 0:
             return False
-        for row1, row2 in zip(r1, r2):
+
+        def _match_table_cells(c1: Any, c2: Any) -> bool:
+            if isinstance(c1, (int, float)) and isinstance(c2, (int, float)):
+                diff = abs(float(c1) - float(c2))
+                max_v = max(abs(float(c1)), abs(float(c2)))
+                return diff < 1e-4 or (max_v > 0 and diff / max_v < 1e-5)
+            return are_strings_in_consensus(c1, c2)
+
+        def _match_rows(row1: List[Any], row2: List[Any]) -> bool:
             if len(row1) != len(row2):
                 return False
-            for c1, c2 in zip(row1, row2):
-                if isinstance(c1, (int, float)) and isinstance(c2, (int, float)):
-                    diff = abs(float(c1) - float(c2))
-                    max_v = max(abs(float(c1)), abs(float(c2)))
-                    if diff >= 1e-4 and (max_v == 0 or diff / max_v >= 1e-5):
-                        return False
-                else:
-                    if not are_strings_in_consensus(c1, c2):
-                        return False
+            return all(_match_table_cells(c1, c2) for c1, c2 in zip(row1, row2))
+
+        # Thứ tự các dòng không ảnh hưởng kết quả chấm (Rulebook Mục 9): Bipartite matching
+        used_indices = set()
+        for row1 in r1:
+            matched = False
+            for j, row2 in enumerate(r2):
+                if j in used_indices:
+                    continue
+                if _match_rows(row1, row2):
+                    used_indices.add(j)
+                    matched = True
+                    break
+            if not matched:
+                return False
         return True
 
     return False

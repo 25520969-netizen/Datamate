@@ -56,6 +56,7 @@ QUY TẮC CỐT LÕI (DUCKDB SQL):
    - Tỉ trọng doanh thu nhóm/sản phẩm: Mẫu số phải là tổng doanh thu toàn shop (không dùng INNER JOIN làm co hẹp mẫu số). Ví dụ: `SUM(CASE WHEN "Nhóm" = '...' THEN "Thành tiền" ELSE 0 END) * 100.0 / NULLIF(SUM("Thành tiền"), 0)`.
    - Tìm kiếm chuỗi tiếng Việt không dấu hoặc viết tắt: Dùng `WHERE strip_accents("Tên sản phẩm") ILIKE strip_accents('%từ khóa%')` (DuckDB hỗ trợ hàm `strip_accents()`).
    - Hỏi số lượng ("bao nhiêu đĩa / cái / kg / ly / chai / lon / nồi"): Trả về SỐ LƯỢNG (cột `"Số lượng"` hoặc `"qty_base"`), KHÔNG phải doanh thu!
+   - Bảng công nợ khách hàng (Top khách nợ nhiều nhất đến ngày X): Chỉ tính đơn không hủy (status_norm = 'Hoàn thành' hoặc Trạng thái NOT ILIKE '%hủy%'), BỎ đơn COD (Hình thức thanh toán NOT IN ('cod')), BỎ khách lẻ (Tên khách NOT ILIKE '%lẻ%'). Cột 1 là tên khách, cột 2 là số tiền nợ.
    - Cột "business_id" đã có sẵn trong mọi bảng, dữ liệu trong DuckDB đã thuộc riêng shop hiện tại.
 2. Định dạng biến kết quả cuối cùng:
    - `number`: `result = {"type": "number", "answer": float(val)}`
@@ -63,7 +64,7 @@ QUY TẮC CỐT LÕI (DUCKDB SQL):
    - `date`: `result = {"type": "date", "answer": "YYYY-MM-DD"}`
    - `string`: `result = {"type": "string", "answer": "Tên đối tượng"}`
    - `list`: `result = {"type": "list", "answer": [r[0] for r in con.execute(...).fetchall()]}` (danh sách phẳng các chuỗi/số)
-   - `table`: `result = {"columns": ["tên cột 1", "tên cột 2"], "rows": [list(r) for r in con.execute(...).fetchall()]}`
+   - `table`: `result = {"type": "table", "answer": {"columns": ["khach_hang", "so_tien_no"], "rows": [list(r) for r in con.execute(...).fetchall()]}}`
    - `unanswerable`: `result = {"type": "unanswerable", "reason": "..."}`
 3. Chỉ trả về một khối mã ```python ... ``` duy nhất, không giải thích văn bản thừa."""
 
@@ -76,6 +77,7 @@ Nhiệm vụ: Viết một đoạn mã Python truy vấn dữ liệu từ kết 
 QUY TẮC CỐT LÕI (DEFENSIVE VERIFICATION DUCKDB ENGINE):
 1. Tổ chức truy vấn kiểm soát dữ liệu chặt chẽ:
    - Ưu tiên viết truy vấn trực tiếp, đơn giản và sạch sẽ. Có thể dùng CTE (WITH ... AS ...) nếu bài toán có nhiều bước tính phức tạp.
+   - Mặc định giao dịch hợp lệ (doanh thu, số lượng đơn, bán chạy): Bỏ đơn hủy và đơn trả hàng, dùng WHERE "status_norm" = 'Hoàn thành' (hoặc "Trạng thái" NOT ILIKE '%hủy%' AND "Trạng thái" NOT ILIKE '%trả%').
    - TUYỆT ĐỐI KHÔNG tự ý JOIN bảng chi tiết với bảng hóa đơn khi câu hỏi chỉ cần dữ liệu từ 1 bảng duy nhất (như bảng bán hàng hoặc bảng hóa đơn), vì JOIN thừa sẽ nhân bản dòng dữ liệu (Cartesian product) làm sai lệch nghiêm trọng kết quả tính toán!
    - Tỉ lệ đơn hủy: KHÔNG được lọc bỏ đơn hủy trước khi tính (tuyệt đối không dùng `WHERE "Trạng thái" NOT IN ('Đã hủy')` làm mất đơn hủy). Công thức chuẩn: `COUNT(DISTINCT CASE WHEN "status_norm" = 'Đã hủy' THEN "Mã đơn hàng" END) * 100.0 / NULLIF(COUNT(DISTINCT "Mã đơn hàng"), 0)`.
 2. Quy tắc an toàn bắt buộc:
@@ -85,7 +87,7 @@ QUY TẮC CỐT LÕI (DEFENSIVE VERIFICATION DUCKDB ENGINE):
    - Tên bảng và tên cột tiếng Việt có dấu, khoảng trắng BẮT BUỘC bọc trong ngoặc kép: `"Thành tiền"`, `"Mã đơn hàng"`, `"Ngày"`, `"Trạng thái"`.
    - Lọc ngày theo khoảng thời gian: `WHERE CAST("Ngày" AS DATE) BETWEEN DATE 'start' AND DATE 'end'`.
    - Lọc lũy kế ("tính đến ngày X", "tính đến hết ngày X", "còn nợ", "còn tồn"): Lấy toàn bộ giao dịch phát sinh từ đầu dữ liệu đến hết ngày X: `WHERE CAST("Ngày" AS DATE) <= DATE 'X'` (hoặc `WHERE "Ngày" <= 'YYYY-MM-DD 23:59:59'`), TUYỆT ĐỐI KHÔNG lọc gói gọn trong riêng ngày X (`BETWEEN X AND X`).
-   - Công nợ khách hàng (còn nợ, nợ nhiều nhất): Tính `SUM(COALESCE("Tổng tiền hàng", "Tổng bill", "Thành tiền", 0)) - SUM(COALESCE("Khách đã trả", "Khách trả", 0))` hoặc cột nợ phát sinh, KHÔNG lấy tổng doanh thu làm công nợ.
+   - Công nợ khách hàng (còn nợ, nợ nhiều nhất): Chỉ tính đơn không hủy (status_norm = 'Hoàn thành' hoặc Trạng thái NOT ILIKE '%hủy%'), BỎ đơn COD và đơn sàn TMĐT, BỎ khách lẻ. Tính `SUM(COALESCE("Phải thu", "TongThanhToan", "Tổng tiền hàng", 0) - COALESCE("Thanh toán", "KhachDaTra", "Khách đã trả", 0))`.
    - Doanh thu (revenue): Luôn là `SUM(COALESCE("revenue_norm", "Thành tiền"))`.
    - Sản phẩm bán chạy nhất: Luôn xếp theo `SUM(COALESCE("qty_base", "Số lượng")) DESC` (sản lượng bán ra), KHÔNG xếp theo doanh thu.
    - Tránh chia cho 0: Luôn dùng `NULLIF(..., 0)` ở mẫu số để tránh lỗi crash division by zero.
@@ -97,7 +99,7 @@ QUY TẮC CỐT LÕI (DEFENSIVE VERIFICATION DUCKDB ENGINE):
    - `date`: `result = {"type": "date", "answer": "YYYY-MM-DD"}`
    - `string`: `result = {"type": "string", "answer": "Tên đối tượng"}`
    - `list`: `result = {"type": "list", "answer": [r[0] for r in con.execute(...).fetchall()]}` (danh sách phẳng các chuỗi/số)
-   - `table`: `result = {"columns": ["cột 1", "cột 2"], "rows": [list(r) for r in con.execute(...).fetchall()]}`
+   - `table`: `result = {"type": "table", "answer": {"columns": ["khach_hang", "so_tien_no"], "rows": [list(r) for r in con.execute(...).fetchall()]}}`
    - `unanswerable`: `result = {"type": "unanswerable", "reason": "..."}`
 4. Chỉ trả về một khối mã ```python ... ``` duy nhất, không giải thích văn bản thừa."""
 
@@ -375,11 +377,18 @@ class DataMateAgent:
             parts.append(entity_hints)
         if few_shot_prompt:
             parts.append(few_shot_prompt)
+        format_guidance = f"Cuối đoạn code, bắt buộc gán `result = {{\"type\": \"...\", \"answer\": ...}}`."
+        if expected_type == "table":
+            format_guidance += (
+                f"\nĐẶC BIỆT KIỂU TABLE (Rulebook Mục 9): Bắt buộc gán cấu trúc `answer` là dict gồm 'columns' và 'rows':\n"
+                f"`result = {{\"type\": \"table\", \"answer\": {{\"columns\": [\"khach_hang\", \"so_tien_no\"], \"rows\": [list(r) for r in rows]}}}}`"
+            )
+
         parts.extend([
             "=== YÊU CẦU SINH MÃ PYTHON ===\n"
             "Hãy viết mã Python truy vấn dữ liệu từ `tables` hoặc `con` DuckDB để tính ra kết quả chính xác.\n"
             "Toàn bộ bảng dữ liệu đã nạp sẵn vào biến `con` và `tables`, không gọi `duckdb.connect()`, không viết comment (# ...).\n"
-            f"Cuối đoạn code, bắt buộc gán `result = {{\"type\": \"...\", \"answer\": ...}}`."
+            + format_guidance
         ])
         return "\n\n".join(parts)
 
@@ -699,6 +708,17 @@ class DataMateAgent:
                     is_consensus = False
                     final_pred = pred1
                     decision_reason = "p1_revenue_master_arbitration"
+                elif pred1.get("type") == "number" and pred2.get("type") == "number":
+                    p1_has_status = any(k in p1_code_str for k in ("status_norm", "Hoàn thành", "hoàn thành", "hủy", "huy"))
+                    p2_has_status = any(k in p2_code_str for k in ("status_norm", "Hoàn thành", "hoàn thành", "hủy", "huy"))
+                    if p1_has_status and not p2_has_status and isinstance(p1_num, (int, float)) and isinstance(p2_num, (int, float)) and p2_num >= p1_num:
+                        is_consensus = False
+                        final_pred = pred1
+                        decision_reason = "p1_status_filter_semantic_arbitration"
+                    else:
+                        is_consensus = False
+                        final_pred = {"id": qid, "type": "abstain"}
+                        decision_reason = "consensus_disagreement_abstain"
                 elif expected_type == "percent" and pred1.get("type") == "percent" and pred2.get("type") == "number":
                     is_consensus = False
                     final_pred = pred1
@@ -707,6 +727,23 @@ class DataMateAgent:
                     is_consensus = False
                     final_pred = pred2
                     decision_reason = "type_priority_arbitration_p2"
+                elif expected_type == "table":
+                    ans1 = pred1.get("answer") if isinstance(pred1.get("answer"), dict) else {}
+                    ans2 = pred2.get("answer") if isinstance(pred2.get("answer"), dict) else {}
+                    r1 = ans1.get("rows", [])
+                    r2 = ans2.get("rows", [])
+                    if len(r1) > 0 and len(r2) == 0:
+                        is_consensus = False
+                        final_pred = pred1
+                        decision_reason = "p1_table_non_empty_arbitration"
+                    elif len(r2) > 0 and len(r1) == 0:
+                        is_consensus = False
+                        final_pred = pred2
+                        decision_reason = "p2_table_non_empty_arbitration"
+                    else:
+                        is_consensus = False
+                        final_pred = {"id": qid, "type": "abstain"}
+                        decision_reason = "table_disagreement_abstain"
                 else:
                     is_consensus = False
                     final_pred = {"id": qid, "type": "abstain"}
@@ -720,6 +757,15 @@ class DataMateAgent:
                 is_consensus = False
                 final_pred = pred1
                 decision_reason = "p1_cancel_rate_guard_arbitration"
+            elif expected_type == "table" and pred1.get("type") == "table":
+                ans1 = pred1.get("answer") if isinstance(pred1.get("answer"), dict) else {}
+                if len(ans1.get("rows", [])) > 0:
+                    is_consensus = False
+                    final_pred = pred1
+                    decision_reason = "p1_table_valid_p2_failed_fallback"
+                else:
+                    final_pred = {"id": qid, "type": "abstain"}
+                    decision_reason = "strict_requires_both"
             elif self.arbitration_strategy == "adaptive":
                 # Prompt 1 (SQL) vượt qua toàn bộ guard an toàn, Prompt 2 lỗi kỹ thuật -> Giữ Prompt 1
                 is_consensus = False

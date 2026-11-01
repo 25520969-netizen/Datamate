@@ -879,6 +879,51 @@ class DAILFewShotSelector:
         "  AND \"Thời gian\" >= '2025-07-01' AND \"Thời gian\" < '2025-08-01';"
     )
 
+    EXEMPLAR_TOP_CUSTOMERS_LIST = (
+        "/* Ví dụ DAIL-O 15: Top N khách hàng mua nhiều nhất / chi tiêu nhiều nhất (dạng danh sách) */\n"
+        "-- Câu hỏi: 5 khách hàng có tổng tiền mua cao nhất tuần rồi là ai?\n"
+        "-- Lưu ý: BẮT BUỘC loại bỏ 'Khách lẻ', 'lẻ', 'vãng lai' và NULL trong WHERE TRƯỚC KHI LIMIT N để trả về đủ N khách hàng thực tế:\n"
+        "SELECT \"Khách hàng\"\n"
+        "FROM ban_hang\n"
+        "WHERE \"status_norm\" = 'Hoàn thành'\n"
+        "  AND CAST(\"Ngày\" AS DATE) BETWEEN DATE '2025-07-28' AND DATE '2025-08-03'\n"
+        "  AND \"Khách hàng\" NOT ILIKE '%khách lẻ%'\n"
+        "  AND \"Khách hàng\" NOT ILIKE '%lẻ%'\n"
+        "  AND \"Khách hàng\" NOT ILIKE '%vãng lai%'\n"
+        "  AND \"Khách hàng\" IS NOT NULL\n"
+        "GROUP BY \"Khách hàng\"\n"
+        "ORDER BY SUM(COALESCE(\"revenue_norm\", \"Thành tiền\")) DESC\n"
+        "LIMIT 5;"
+    )
+
+    EXEMPLAR_SINGLE_ITEM_QTY = (
+        "/* Ví dụ DAIL-O 16: Số lượng bán ra của một món ăn / mặt hàng cụ thể (mấy đĩa / kg / ly / lon / cái / nồi) */\n"
+        "-- Câu hỏi: Trong tháng 1/2025 cửa hàng bán được mấy nồi lẩu gà lá é?\n"
+        "-- Lưu ý: Hỏi SỐ LƯỢNG (mấy nồi, mấy đĩa, mấy kg, mấy lon, bao nhiêu gói) thì BẮT BUỘC tính tổng sản lượng `qty_base` (hoặc Số lượng), tuyệt đối KHÔNG tính doanh thu tiền:\n"
+        "SELECT COALESCE(SUM(COALESCE(\"qty_base\", \"Số lượng\")), 0) AS answer\n"
+        "FROM ban_hang\n"
+        "WHERE \"status_norm\" = 'Hoàn thành'\n"
+        "  AND \"Thời gian\" >= '2025-01-01' AND \"Thời gian\" < '2025-02-01'\n"
+        "  AND \"Tên hàng\" ILIKE '%lẩu gà lá é%';"
+    )
+
+    EXEMPLAR_BOOLEAN_TREND = (
+        "/* Ví dụ DAIL-O 17: Kiểm tra xu hướng doanh thu có tăng liên tục qua các tháng không (True/False) */\n"
+        "-- Câu hỏi: Doanh thu 3 tháng 5/2025, 6/2025, 7/2025 có tăng liên tục không?\n"
+        "-- Lưu ý: Tính doanh thu từng tháng bằng WITH monthly AS (...), sau đó so sánh bằng scalar subqueries:\n"
+        "WITH monthly AS (\n"
+        "  SELECT SUBSTR(\"Thời gian\", 1, 7) AS ym, SUM(\"revenue_norm\") AS rev\n"
+        "  FROM ban_hang\n"
+        "  WHERE \"status_norm\" = 'Hoàn thành' AND SUBSTR(\"Thời gian\", 1, 7) IN ('2025-05', '2025-06', '2025-07')\n"
+        "  GROUP BY ym\n"
+        ")\n"
+        "SELECT CASE\n"
+        "  WHEN (SELECT rev FROM monthly WHERE ym = '2025-05') < (SELECT rev FROM monthly WHERE ym = '2025-06')\n"
+        "   AND (SELECT rev FROM monthly WHERE ym = '2025-06') < (SELECT rev FROM monthly WHERE ym = '2025-07')\n"
+        "  THEN TRUE ELSE FALSE\n"
+        "END AS answer;"
+    )
+
     @classmethod
     def select_exemplars(cls, question: str, has_entity_hint: bool = False) -> str:
         """
@@ -908,8 +953,15 @@ class DAILFewShotSelector:
             selected.append(cls.EXEMPLAR_CATEGORY_SHARE)
 
         # Intent 6: Top khách hàng mua nhiều nhất / chi tiêu nhiều nhất (loại bỏ Khách lẻ)
-        if any(kw in q for kw in ["ai mua", "khach nao mua", "khach nao chi", "khach hang nao mua", "khach mua nhieu", "chi tieu nhieu nhat", "mua nhieu nhat", "ai chi tieu", "ai la nguoi mua"]):
-            selected.append(cls.EXEMPLAR_TOP_CUSTOMER)
+        if any(kw in q for kw in [
+            "ai mua", "khach nao mua", "khach nao chi", "khach hang nao mua", "khach mua nhieu",
+            "chi tieu nhieu nhat", "mua nhieu nhat", "ai chi tieu", "ai la nguoi mua",
+            "mua cao nhat", "tong tien mua cao", "tien mua cao nhat", "chi nhieu nhat", "mua nhieu tien nhat"
+        ]):
+            if any(kw in q for kw in ["top 3", "top 5", "top 10", "3 khach", "5 khach", "nhung khach"]):
+                selected.append(cls.EXEMPLAR_TOP_CUSTOMERS_LIST)
+            else:
+                selected.append(cls.EXEMPLAR_TOP_CUSTOMER)
 
         # Intent 7: So sánh ca chiều với ca sáng
         if any(kw in q for kw in ["ca chieu", "ca sang"]) and any(kw in q for kw in ["so voi", "so vs", "chenh", "tang hay giam"]):
@@ -935,11 +987,23 @@ class DAILFewShotSelector:
         if any(kw in q for kw in ["het han", "can date", "het date", "qua han dung"]):
             selected.append(cls.EXEMPLAR_EXPIRY_GOODS)
 
-        # Intent 13: Hỏi về 1 món ăn / sản phẩm cụ thể
-        if has_entity_hint and not any(kw in q for kw in ["chay nhat", "hot nhat", "ban nhieu nhat"]):
-            selected.append(cls.EXEMPLAR_SINGLE_ITEM_QUERY)
+        # Intent 13: Xu hướng doanh thu có tăng liên tục không (Boolean)
+        if any(kw in q for kw in ["tang lien tuc", "tăng liên tục", "luon tang", "luôn tăng", "tang deu", "tăng đều"]):
+            selected.append(cls.EXEMPLAR_BOOLEAN_TREND)
 
-        # Intent 14: Công nợ khách hàng
+        # Intent 14: Hỏi về 1 món ăn / sản phẩm cụ thể (Số lượng vs Doanh thu)
+        if has_entity_hint and not any(kw in q for kw in ["chay nhat", "hot nhat", "ban nhieu nhat"]):
+            is_qty_q = any(kw in q for kw in [
+                "may noi", "may dia", "may kg", "may ly", "may lon", "may chai", "may hop", "may goi",
+                "so kg", "so luong kg", "bao nhieu noi", "bao nhieu dia", "bao nhieu ly", "bao nhieu kg",
+                "bao nhieu lon", "bao nhieu chai", "bao nhieu hop", "bao nhieu goi", "san luong", "so luong",
+            ])
+            if is_qty_q:
+                selected.append(cls.EXEMPLAR_SINGLE_ITEM_QTY)
+            else:
+                selected.append(cls.EXEMPLAR_SINGLE_ITEM_QUERY)
+
+        # Intent 15: Công nợ khách hàng
         if any(kw in q for kw in ["cong no", "con no", "no nhieu nhat"]):
             selected.append(cls.EXEMPLAR_CUSTOMER_DEBT)
 

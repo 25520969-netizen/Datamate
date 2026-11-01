@@ -794,8 +794,13 @@ class BusinessDataStore:
                         df[target] = df[found_status]
                         synthetic.add(target)
 
-            # 8. Doanh thu / Thành tiền / Tổng tiền
-            revenue_syns = ["Thành tiền", "revenue_norm", "Tổng tiền", "ThanhTien", "TongTien", "Tiền bán", "Tổng bill", "Tổng đơn", "Trị giá", "Giá trị"]
+            # 8. Doanh thu / Thành tiền / Tổng tiền / Trị giá
+            revenue_syns = [
+                "Thành tiền", "revenue_norm", "Tổng tiền", "ThanhTien", "thanh_tien", "thanhtien",
+                "TongTien", "Tiền bán", "Tổng bill", "Tổng đơn", "Trị giá", "TriGia", "tri_gia", "Giá trị",
+                "TongTienHang", "tong_tien_hang", "TongThanhToan", "tong_thanh_toan", "Tổng", "Tong",
+                "Tổng cộng", "TongCong", "tiền hàng", "TienHang",
+            ]
             found_rev = next((c for c in revenue_syns if c in df.columns), None)
             if found_rev:
                 for target in ["Thành tiền", "revenue_norm", "Tổng tiền"]:
@@ -1155,7 +1160,9 @@ class BusinessDataStore:
             if "revenue_norm" not in df.columns:
                 pure_rev_col = next(
                     (c for c in df.columns if any(c.lower().strip() == p for p in [
-                        "tien hang", "tiền hàng", "thành tiền", "thanh tien", "thành tiền (đ)", "amount", "tổng tiền hàng"
+                        "tien hang", "tiền hàng", "thành tiền", "thanh tien", "thanh_tien", "thanhtien",
+                        "thành tiền (đ)", "amount", "tổng tiền hàng", "tongtienhang", "tong_tien_hang",
+                        "trigia", "tri_gia", "trị giá", "tongthanhtoan", "tong_thanh_toan", "tổng thanh toán",
                     ])),
                     None
                 )
@@ -1164,7 +1171,8 @@ class BusinessDataStore:
                 else:
                     tot_rev_col = next(
                         (c for c in df.columns if any(c.lower().strip() == p for p in [
-                            "tổng tiền", "tongtien", "tongcong", "tổng cộng", "tiền", "thành tiền"
+                            "tổng tiền", "tongtien", "tongcong", "tổng cộng", "tiền", "thành tiền",
+                            "tổng", "tong", "tổng đơn", "tong_don", "tổng bill", "tong_bill",
                         ])),
                         None
                     )

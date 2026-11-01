@@ -414,3 +414,101 @@ c.close()
     assert res["ok"] is True, f"Sandbox failed with error: {res.get('error')}"
     assert res["result"] == 1
 
+
+def test_bom_stripping_and_robust_csv_reading(tmp_path: Path):
+    """Kiểm tra bóc ký tự BOM \ufeff và đọc file CSV có BOM utf-8-sig / windows-1258."""
+    from src.ingest import to_nfc, _read_csv_robust
+    # 1. Bóc BOM trong chuỗi
+    assert to_nfc("\ufeffMã đơn hàng") == "Mã đơn hàng"
+    assert to_nfc("\ufeffDoanh thu") == "Doanh thu"
+
+    # 2. File CSV có BOM
+    csv_file = tmp_path / "test_bom.csv"
+    csv_file.write_bytes(b"\xef\xbb\xbfM\xc3\xa3 \xc4\x91\xc6\xa1n,Th\xc3\xa0nh ti\xe1\xbb\x81n\nDH01,100000\n")
+    df = _read_csv_robust(csv_file)
+    assert df.columns[0] == "Mã đơn"
+    assert df.shape == (1, 2)
+
+
+def test_empty_dimension_subtotal_row_dropped(tmp_path: Path):
+    """Kiểm tra loại bỏ các dòng footer/subtotal rác chỉ có số tiền nhưng không có chiều nghiệp vụ (dev_001)."""
+    from src.ingest import apply_rulebook_section8_cleaning
+    df = pd.DataFrame({
+        "Mã đơn hàng": ["DH01", "DH02", None],
+        "Ngày": ["2026-07-08", "2026-07-08", None],
+        "Tên hàng": ["Coca 330ml", "Pepsi 330ml", None],
+        "Thành tiền": [10000, 20000, 10104800],
+    })
+    df_cleaned = apply_rulebook_section8_cleaning(df)
+    assert len(df_cleaned) == 2, "Dòng subtotal không chữ phải bị loại bỏ khỏi bảng bán hàng"
+    assert df_cleaned["Thành tiền"].max() == 20000
+
+
+def test_fallback_order_id_stt_alias(tmp_path: Path):
+    """Kiểm tra bảng dùng STT làm khóa đơn (dev_014) tự động được tiêm alias Mã đơn hàng."""
+    biz_dir = tmp_path / "biz_stt"
+    biz_dir.mkdir(parents=True)
+    df = pd.DataFrame({
+        "Ngày": ["2026-01-01", "2026-01-01", "2026-01-02"],
+        "STT": [1, 1, 2],
+        "Hàng": ["Hàng A", "Hàng B", "Hàng C"],
+        "Thành tiền": [100, 200, 300],
+    })
+    df.to_csv(biz_dir / "BanHang.csv", index=False)
+    store = BusinessDataStore(data_root=tmp_path, cache_root=tmp_path / ".cache")
+    con, tables = store.create_duckdb_connection("biz_stt")
+    assert "Mã đơn hàng" in tables["BanHang"].columns
+    assert "Mã đơn" in tables["BanHang"].columns
+    res = con.execute('SELECT COUNT(DISTINCT "Mã đơn hàng") FROM "BanHang"').fetchone()[0]
+    assert res == 2
+
+
+def test_multi_level_header_merge(tmp_path: Path):
+    """Kiểm tra ghép tiêu đề 2 tầng (Multi-level header) do merge cells trong Excel."""
+    from io import BytesIO
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_raw = pd.DataFrame([
+            ["Doanh thu bán hàng", None, "Chi phí hoạt động", None],
+            ["Tiền mặt", "Chuyển khoản", "Tiền mặt", "Chuyển khoản"],
+            [100, 200, 50, 70],
+        ])
+        df_raw.to_excel(writer, sheet_name="BaoCao", header=False, index=False)
+    output.seek(0)
+    xl = pd.ExcelFile(output)
+    parsed = BusinessDataStore._parse_sheet_smart_header(xl, "BaoCao")
+    assert "Doanh thu bán hàng - Tiền mặt" in parsed.columns
+    assert "Doanh thu bán hàng - Chuyển khoản" in parsed.columns
+    assert "Chi phí hoạt động - Tiền mặt" in parsed.columns
+    assert "Chi phí hoạt động - Chuyển khoản" in parsed.columns
+    assert parsed.iloc[0]["Doanh thu bán hàng - Tiền mặt"] == 100
+
+
+def test_matrix_unpivot_table():
+    """Kiểm tra bảng ma trận báo cáo 2 chiều tự động sinh bảng unpivot song song."""
+    df_matrix = pd.DataFrame({
+        "Tên sản phẩm": ["Cà phê", "Trà đào"],
+        "Tháng 1": [1000, 2000],
+        "Tháng 2": [1200, 2100],
+        "Tháng 3": [1300, 2200],
+    })
+    tables = {"BaoCao": df_matrix}
+    unp_tables = BusinessDataStore._detect_and_unpivot_matrix_tables(tables)
+    assert "BaoCao_unpivot" in unp_tables
+    df_unp = unp_tables["BaoCao_unpivot"]
+    assert "revenue_norm" in df_unp.columns
+    assert "Thời gian" in df_unp.columns
+    assert len(df_unp) == 6
+
+
+def test_list_prefix_consensus():
+    """Kiểm tra Prefix-Consensus cho dạng List (Borchmann 2025): Danh sách ngắn là tiền tố của danh sách dài."""
+    p1 = {"type": "list", "answer": ["SP1", "SP2", "SP3", "SP4", "SP5"]}
+    p2 = {"type": "list", "answer": ["SP1", "SP2", "SP3", "SP4"]}
+    assert check_consensus(p1, p2) is True
+
+    # Khác phần tử tiền tố -> không đồng thuận
+    p3 = {"type": "list", "answer": ["SP9", "SP2", "SP3", "SP4"]}
+    assert check_consensus(p1, p3) is False
+
+

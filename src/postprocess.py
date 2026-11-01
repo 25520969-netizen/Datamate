@@ -311,7 +311,9 @@ def postprocess_and_guard(
                 "thay doi", "tang hay giam", "tang giam",
                 "ti le don huy", "ti le huy", "ti le huy don", "ti le don bi huy",
                 "chiem bao nhieu %", "chiem bn %", "dong gop bn %", "dong gop bao nhieu %",
-                "chiem bnhiu %", "chiem bao nhiu %"
+                "chiem bnhiu %", "chiem bao nhiu %",
+                "chiem bao nhieu phan tram", "chiem bao nhiu phan tram", "chiem bn phan tram",
+                "tra bang tm", "tien mat", "chuyen khoan", "vi dien tu"
             ]):
                 return abstain_resp
 
@@ -674,18 +676,35 @@ def check_consensus(pred1: Dict[str, Any], pred2: Dict[str, Any]) -> bool:
     if t1 == "list":
         if not isinstance(a1, list) or not isinstance(a2, list):
             return False
-        if len(a1) != len(a2):
-            return False
-        for x, y in zip(a1, a2):
-            if isinstance(x, (int, float)) and isinstance(y, (int, float)):
-                diff = abs(float(x) - float(y))
-                max_v = max(abs(float(x)), abs(float(y)))
-                if diff >= 1e-4 and (max_v == 0 or diff / max_v >= 1e-5):
-                    return False
-            else:
-                if not are_strings_in_consensus(x, y):
-                    return False
-        return True
+        # Nếu cùng độ dài -> so khớp từng phần tử
+        if len(a1) == len(a2):
+            for x, y in zip(a1, a2):
+                if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+                    diff = abs(float(x) - float(y))
+                    max_v = max(abs(float(x)), abs(float(y)))
+                    if diff >= 1e-4 and (max_v == 0 or diff / max_v >= 1e-5):
+                        return False
+                else:
+                    if not are_strings_in_consensus(x, y):
+                        return False
+            return True
+        # Nếu khác độ dài: Áp dụng Prefix-Consensus (Paper Borchmann 2025)
+        # Khi danh sách ngắn có ít nhất 2 phần tử và toàn bộ các phần tử của nó trùng với tiền tố của danh sách dài
+        min_len = min(len(a1), len(a2))
+        if min_len >= 2:
+            for i in range(min_len):
+                x = a1[i]
+                y = a2[i]
+                if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+                    diff = abs(float(x) - float(y))
+                    max_v = max(abs(float(x)), abs(float(y)))
+                    if diff >= 1e-4 and (max_v == 0 or diff / max_v >= 1e-5):
+                        return False
+                else:
+                    if not are_strings_in_consensus(x, y):
+                        return False
+            return True
+        return False
 
     # 6. So khớp TABLE
     if t1 == "table":

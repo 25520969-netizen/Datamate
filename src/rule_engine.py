@@ -279,6 +279,15 @@ class RuleEngine:
         s = re.sub(r"\bnhieeu\b", "nhiều", s)
         s = re.sub(r"\bbieets\b", "biết", s)
         s = re.sub(r"\bvaayj\b", "vậy", s)
+        s = re.sub(r"\bddown\b", "đơn", s)
+        s = re.sub(r"\bsoos\b", "số", s)
+        s = re.sub(r"\bcos\b", "có", s)
+        s = re.sub(r"\bmawtj\b", "mặt", s)
+        s = re.sub(r"\bhangf\b", "hàng", s)
+        s = re.sub(r"\bcungf\b", "cùng", s)
+        s = re.sub(r"\bthuoocs\b", "thuốc", s)
+        s = re.sub(r"\bmaays\b", "mấy", s)
+        s = re.sub(r"\bconf\b", "còn", s)
         return s
 
     @staticmethod
@@ -638,7 +647,8 @@ class RuleEngine:
             f"- Tuần bắt đầu từ: {self.knobs.week_start_day}.\n"
             f"- 'Quá N, hơn N, trên N, dưới N': không gồm N; 'Từ N trở lên, từ N trở xuống': gồm N.\n"
             f"- Ca sáng: {morning_str}, ca chiều: {afternoon_str} (so ca chiều với ca sáng: mốc là ca sáng).\n"
-            f"- Hỏi số còn lại ('tính đến hết ngày X', 'còn nợ', 'còn tồn'): tính mọi phát sinh từ đầu dữ liệu đến hết ngày đó."
+            f"- Hỏi số còn lại ('tính đến hết ngày X', 'còn nợ', 'còn tồn'): tính mọi phát sinh từ đầu dữ liệu đến hết ngày đó.\n"
+            f"- Sản phẩm có phân loại kích cỡ / size trong ngoặc đơn (S, M, L...): Khi câu hỏi nêu rõ size (ví dụ: 'Sinh tố xoài (L)', 'Trà sữa (M)'), BẮT BUỘC lọc chính xác tên có kèm size trong ngoặc ('%(L)%' hoặc '%(M)%'), TUYỆT ĐỐI KHÔNG lọc tên chung chung làm cộng dồn tất cả các size!"
         )
 
         seen = set()
@@ -929,7 +939,8 @@ class DAILFewShotSelector:
         """
         DAIL-S: Tự động trích xuất 1-2 ví dụ có khung xương (Skeleton) tương đồng nhất theo intent của câu hỏi.
         """
-        q = strip_accents(question).lower().strip()
+        q_norm = RuleEngine.normalize_telex_typos(question.lower().strip())
+        q = strip_accents(q_norm).lower().strip()
         selected: List[str] = []
 
         # Intent 1: Tỉ lệ đơn hủy

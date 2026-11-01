@@ -50,6 +50,15 @@ ORDER_ID_CANDIDATES = {
     "Mã giao dịch",
 }
 
+ORDER_ID_FALLBACK_CANDIDATES = (
+    "STT",
+    "Số TT",
+    "Số thứ tự",
+    "Biển số",
+    "Biển số xe",
+    "IMEI",
+)
+
 ORDER_LEVEL_COL_PREFIXES = (
     "ngày",
     "ngay",
@@ -77,11 +86,27 @@ ORDER_LEVEL_COL_PREFIXES = (
 
 
 def to_nfc(text: Any) -> Any:
-    """Chuẩn hóa chuỗi sang Unicode NFC và gộp khoảng trắng ngang thừa."""
+    """Chuẩn hóa chuỗi sang Unicode NFC, loại bỏ BOM \ufeff và gộp khoảng trắng ngang thừa."""
     if isinstance(text, str):
-        s = unicodedata.normalize("NFC", text).strip()
+        cleaned = text.replace("\ufeff", "")
+        s = unicodedata.normalize("NFC", cleaned).strip()
         return re.sub(r"[ \t]+", " ", s)
     return text
+
+
+def _read_csv_robust(file_path: Path) -> pd.DataFrame:
+    """Đọc file CSV với khả năng tự động xử lý BOM (utf-8-sig) và fallback đa bảng mã (windows-1258, latin-1)."""
+    encodings_to_try = ["utf-8-sig", "utf-8", "windows-1258", "latin-1"]
+    last_err: Optional[Exception] = None
+    for enc in encodings_to_try:
+        try:
+            return pd.read_csv(file_path, encoding=enc, low_memory=False)
+        except (UnicodeDecodeError, Exception) as e:
+            last_err = e
+            continue
+    if last_err:
+        raise last_err
+    return pd.read_csv(file_path, low_memory=False)
 
 
 def _accent_strip_key(text: Any) -> str:
@@ -559,6 +584,11 @@ def apply_rulebook_section8_cleaning(df: pd.DataFrame) -> pd.DataFrame:
         if col in ORDER_ID_CANDIDATES:
             order_col = col
             break
+    if order_col is None:
+        for col in df.columns:
+            if col in ORDER_ID_FALLBACK_CANDIDATES:
+                order_col = col
+                break
 
     if order_col is not None:
         # Thay thế chuỗi rỗng bằng NaN trên cột mã đơn để fill-down chính xác
@@ -568,13 +598,24 @@ def apply_rulebook_section8_cleaning(df: pd.DataFrame) -> pd.DataFrame:
         # Phát hiện các dòng tổng kết / subtotal (ví dụ: Cộng ngày, Tổng tháng, Tổng cộng, Grand Total)
         # Các dòng này có mã đơn là NA và chứa từ khóa tổng kết ở một trong các cột văn bản.
         # Tuyệt đối KHÔNG fill-down mã đơn hoặc thông tin đơn hàng vào các dòng tổng kết này.
-        subtotal_pat = re.compile(r"^\s*(?:cộng\s+ngày|tổng\s+tháng|tổng\s+cộng|grand\s+total|subtotal|cộng\b|tổng\b)", re.IGNORECASE)
+        subtotal_pat = re.compile(
+            r"^\s*(?:cộng\s+ngày|tổng\s+tháng|tổng\s+cộng|grand\s+total|subtotal|cộng\b|tổng\b|tổng\s+phát\s+sinh|cộng\s+chuyển\s+sang|thành\s+tiền\s+cả\s+đợt|kế\s+toán\b|người\s+lập\b|bằng\s+chữ\b)",
+            re.IGNORECASE,
+        )
         is_subtotal = pd.Series(False, index=df.index)
         na_order_mask = df[order_col].isna()
         if na_order_mask.any():
             text_cols = [c for c in df.columns if c != order_col and df[c].dtype == object]
             for tc in text_cols:
                 is_subtotal = is_subtotal | (na_order_mask & df[tc].astype(str).str.contains(subtotal_pat, na=False))
+
+            # Phát hiện thêm các dòng footer / subtotal tự do không có từ khóa "tổng/cộng"
+            # (Ví dụ: dòng 90850 dev_001 có Thành tiền 10,104,800 nhưng Ngày, Tên hàng, Khách hàng đều là NA)
+            dim_keywords = ("ngày", "ngay", "thời gian", "tên hàng", "sản phẩm", "hàng hóa", "khách hàng", "khách", "mặt hàng")
+            present_dims = [c for c in df.columns if c != order_col and any(k in c.lower() for k in dim_keywords) and not c.startswith("_")]
+            if present_dims:
+                all_dims_na = df[present_dims].isna().all(axis=1) | df[present_dims].astype(str).isin(["", "None", "nan", "<NA>"]).all(axis=1)
+                is_subtotal = is_subtotal | (na_order_mask & all_dims_na)
 
         # Chỉ fill-down mã đơn cho các dòng chi tiết đơn hàng thông thường (không phải subtotal)
         # Dòng subtotal giữ nguyên mã đơn là NA để không bị gộp chung vào đơn hàng cuối cùng
@@ -607,9 +648,23 @@ def apply_rulebook_section8_cleaning(df: pd.DataFrame) -> pd.DataFrame:
 
             # Loại bỏ hai dòng của cùng một đơn giống nhau ở mọi ô (chỉ áp dụng cho các dòng thuộc về một đơn hàng)
             data_cols = [c for c in df.columns if not c.startswith("_")]
-            order_rows = df[df[order_col].notna()].drop_duplicates(subset=data_cols, keep="first")
-            no_order_rows = df[df[order_col].isna()]
+            order_rows = df[df[order_col].notna() & ~is_subtotal].drop_duplicates(subset=data_cols, keep="first")
+            no_order_rows = df[df[order_col].isna() & ~is_subtotal]
             df = pd.concat([order_rows, no_order_rows]).sort_index().reset_index(drop=True)
+        elif is_subtotal.any():
+            df = df[~is_subtotal].reset_index(drop=True)
+    else:
+        # Nếu bảng không có cột mã đơn, vẫn lọc các dòng subtotal rác ở cuối bảng
+        dim_keywords = ("ngày", "ngay", "thời gian", "tên hàng", "sản phẩm", "hàng hóa", "khách hàng", "khách", "mặt hàng")
+        present_dims = [c for c in df.columns if any(k in c.lower() for k in dim_keywords) and not c.startswith("_")]
+        if present_dims:
+            all_dims_na = df[present_dims].isna().all(axis=1) | df[present_dims].astype(str).isin(["", "None", "nan", "<NA>"]).all(axis=1)
+            num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and not c.startswith("_")]
+            if num_cols:
+                has_num = df[num_cols].notna().any(axis=1)
+                is_pure_subtotal = all_dims_na & has_num
+                if is_pure_subtotal.any():
+                    df = df[~is_pure_subtotal].reset_index(drop=True)
 
     return df
 
@@ -689,6 +744,7 @@ class BusinessDataStore:
                             tables[to_nfc(tbl_name)] = pd.read_parquet(pq_path)
                     if tables:
                         tables = self._enrich_table_synonyms_and_id(tables, business_id)
+                        tables = self._detect_and_unpivot_matrix_tables(tables)
                         self._mem_cache[business_id] = tables
                         return tables
             except Exception:
@@ -719,6 +775,7 @@ class BusinessDataStore:
                 pass
 
         tables = self._enrich_table_synonyms_and_id(tables, business_id)
+        tables = self._detect_and_unpivot_matrix_tables(tables)
         self._mem_cache[business_id] = tables
         return tables
 
@@ -752,6 +809,11 @@ class BusinessDataStore:
             # 3. Mã đơn hàng / Chứng từ
             order_syns = ["Mã đơn hàng", "Mã hóa đơn", "Mã chứng từ", "Số chứng từ", "SoCT", "Số HĐ", "Mã GD", "Mã đơn", "Ma don", "Số phiếu", "Mã giao dịch", "MaHoaDon", "MaDonHang"]
             found_order = next((c for c in order_syns if c in df.columns), None)
+            if not found_order:
+                # Fallback: nếu bảng không có bất kỳ cột mã đơn chuẩn nào, nhưng có STT / Số TT / Biển số
+                # (đặc biệt trong các bảng như BanHang dev_014 nơi STT gom nhóm các dòng cùng đơn)
+                fallback_order_syns = ["STT", "Số TT", "Số thứ tự", "Biển số", "Biển số xe", "IMEI"]
+                found_order = next((c for c in fallback_order_syns if c in df.columns), None)
             if found_order:
                 for target in ["Mã đơn hàng", "Mã hóa đơn", "Mã chứng từ", "Mã đơn"]:
                     if target not in df.columns:
@@ -847,6 +909,46 @@ class BusinessDataStore:
                 )
         return out
 
+    @staticmethod
+    def _detect_and_unpivot_matrix_tables(tables: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+        """
+        Tự động phát hiện các bảng báo cáo ma trận 2 chiều (hàng là sản phẩm/khoản mục, cột là Tháng 1..12)
+        và tạo thêm bảng unpivot song song dạng quan hệ phẳng ({table_name}_unpivot) vào DuckDB.
+        """
+        month_pat = re.compile(
+            r"^(?:tháng\s*0?([1-9]|1[0-2])|t0?([1-9]|1[0-2])|0?([1-9]|1[0-2])[/-]20\d\d)$",
+            re.IGNORECASE,
+        )
+        new_tables = dict(tables)
+        for tname, df in tables.items():
+            if tname.endswith("_unpivot"):
+                continue
+            month_cols = [c for c in df.columns if month_pat.match(to_nfc(str(c)).strip())]
+            has_date_col = any(c.lower() in ["ngày", "thời gian", "ngay", "date"] for c in df.columns)
+            if len(month_cols) >= 3 and not has_date_col:
+                id_cols = [c for c in df.columns if c not in month_cols and not c.startswith("_")]
+                if id_cols:
+                    try:
+                        df_melted = pd.melt(
+                            df,
+                            id_vars=id_cols,
+                            value_vars=month_cols,
+                            var_name="Thời gian",
+                            value_name="Doanh thu",
+                        )
+                        df_melted["Ngày"] = df_melted["Thời gian"]
+                        df_melted["Thành tiền"] = df_melted["Doanh thu"]
+                        df_melted["revenue_norm"] = pd.to_numeric(
+                            df_melted["Doanh thu"].astype(str).str.replace(r"[^\d.-]", "", regex=True),
+                            errors="coerce",
+                        ).fillna(0.0)
+                        if "business_id" in df.columns:
+                            df_melted["business_id"] = df["business_id"].iloc[0]
+                        new_tables[f"{tname}_unpivot"] = df_melted
+                    except Exception:
+                        pass
+        return new_tables
+
     def _ingest_from_raw(self, business_id: str) -> Dict[str, pd.DataFrame]:
         biz_dir = self.get_biz_dir(business_id)
         if not biz_dir.exists():
@@ -859,7 +961,7 @@ class BusinessDataStore:
         if tables_sub.exists() and tables_sub.is_dir():
             for file_path in sorted(tables_sub.glob("*.csv")):
                 stem = to_nfc(file_path.stem).strip()
-                df = pd.read_csv(file_path, encoding="utf-8", low_memory=False)
+                df = _read_csv_robust(file_path)
                 df = normalize_dataframe_nfc(df)
                 raw_tables[stem] = df
             raw_tables = self._standardize_business_tables(raw_tables)
@@ -873,7 +975,7 @@ class BusinessDataStore:
             stem = to_nfc(file_path.stem).strip()
 
             if suffix == ".csv":
-                df = pd.read_csv(file_path, encoding="utf-8", low_memory=False)
+                df = _read_csv_robust(file_path)
                 df = apply_rulebook_section8_cleaning(df)
                 df = normalize_dataframe_nfc(df)
                 raw_tables[stem] = df
@@ -1337,6 +1439,10 @@ class BusinessDataStore:
                 ]
                 if len(row_vals) < max(2, int(raw_df.shape[1] * 0.5)):
                     continue
+                # Dòng tiêu đề cột phải chứa chữ cái, không thể là dòng dữ liệu toàn số
+                num_count = sum(1 for v in row_vals if re.match(r"^-?\d+(?:\.\d+)?$", v))
+                if num_count >= len(row_vals) * 0.5:
+                    continue
                 # Tính điểm khớp với danh sách cột trong README.md + số lượng ô chuỗi không trùng
                 readme_matches = sum(1 for v in row_vals if readme_cols and v in readme_cols)
                 unique_strs = len(set(row_vals))
@@ -1350,7 +1456,51 @@ class BusinessDataStore:
                     to_nfc(str(v)).strip() if pd.notna(v) and str(v).strip() != "" else f"col_{i}"
                     for i, v in enumerate(raw_df.iloc[best_row_idx].tolist())
                 ]
-                df = raw_df.iloc[best_row_idx + 1 :].copy()
+                data_start_idx = best_row_idx + 1
+
+                # Trường hợp 1: best_row_idx là dòng con, và best_row_idx - 1 là dòng cha (nhóm gộp)
+                if best_row_idx > 0:
+                    parent_row = raw_df.iloc[best_row_idx - 1].tolist()
+                    parent_strs = [to_nfc(str(v)).strip() for v in parent_row if pd.notna(v) and str(v).strip() != ""]
+                    if parent_strs and any(pd.isna(v) or str(v).strip() == "" for v in parent_row):
+                        if all(not re.match(r"^-?\d+(?:\.\d+)?$", s) for s in parent_strs):
+                            parent_filled = pd.Series(parent_row).ffill().tolist()
+                            combined_header = []
+                            for p_val, c_val in zip(parent_filled, header_vals):
+                                p_clean = to_nfc(str(p_val)).strip() if pd.notna(p_val) else ""
+                                c_clean = str(c_val).strip()
+                                if p_clean and not c_clean.startswith("col_") and p_clean.lower() != c_clean.lower():
+                                    combined_header.append(f"{p_clean} - {c_clean}")
+                                elif c_clean and not c_clean.startswith("col_"):
+                                    combined_header.append(c_clean)
+                                elif p_clean:
+                                    combined_header.append(p_clean)
+                                else:
+                                    combined_header.append(c_val)
+                            header_vals = combined_header
+
+                # Trường hợp 2: best_row_idx là dòng cha (có ô trống do merge) và dòng best_row_idx + 1 là dòng con
+                elif best_row_idx + 1 < len(raw_df):
+                    child_row = raw_df.iloc[best_row_idx + 1].tolist()
+                    child_strs = [to_nfc(str(v)).strip() for v in child_row if pd.notna(v) and str(v).strip() != ""]
+                    if len(child_strs) >= max(2, int(len(header_vals) * 0.5)) and all(not re.match(r"^-?\d+(?:\.\d+)?$", s) for s in child_strs):
+                        parent_filled = pd.Series(raw_df.iloc[best_row_idx]).ffill().tolist()
+                        combined_header = []
+                        for i, (p_val, c_val) in enumerate(zip(parent_filled, child_row)):
+                            p_clean = to_nfc(str(p_val)).strip() if pd.notna(p_val) else ""
+                            c_clean = to_nfc(str(c_val)).strip() if pd.notna(c_val) else ""
+                            if p_clean and c_clean and p_clean.lower() != c_clean.lower():
+                                combined_header.append(f"{p_clean} - {c_clean}")
+                            elif c_clean:
+                                combined_header.append(c_clean)
+                            elif p_clean:
+                                combined_header.append(p_clean)
+                            else:
+                                combined_header.append(f"col_{i}")
+                        header_vals = combined_header
+                        data_start_idx = best_row_idx + 2
+
+                df = raw_df.iloc[data_start_idx:].copy()
                 df.columns = header_vals
                 df = df.reset_index(drop=True)
 

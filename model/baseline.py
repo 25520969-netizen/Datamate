@@ -125,7 +125,7 @@ class QwenCoderClient:
         api_base: Optional[str] = None,
         api_key: Optional[str] = None,
         temperature: float = 0.0,
-        max_tokens: int = 384,
+        max_tokens: int = 512,
         request_timeout: float = 90.0,
         custom_generator: Optional[Callable[[List[Dict[str, str]]], str]] = None,
     ) -> None:
@@ -629,12 +629,32 @@ class DataMateAgent:
             # Cả hai bên đều ra đáp án -> Bắt buộc kiểm tra đồng thuận
             if check_consensus(pred1, pred2):
                 is_consensus = True
-                final_pred = pred1
+                if pred1.get("type") == "list":
+                    a1 = pred1.get("answer") or []
+                    a2 = pred2.get("answer") or []
+                    final_pred = pred1 if len(a1) >= len(a2) else pred2
+                else:
+                    final_pred = pred1
                 decision_reason = "consensus_match"
             else:
-                is_consensus = False
-                final_pred = {"id": qid, "type": "abstain"}
-                decision_reason = "consensus_disagreement_abstain"
+                # Query-Feature Arbitration (Paper Lee & Lee 2024 / Borchmann 2025):
+                # Khi câu hỏi hỏi số lượng đơn hàng, nếu P1 dùng COUNT(DISTINCT ...) để chống nhân đôi dòng
+                # từ bảng chi tiết trong khi P2 dùng COUNT(*) đơn thuần -> Ưu tiên P1 với độ tin cậy tuyệt đối.
+                p1_code_str = str(code1 or "")
+                p2_code_str = str(code2 or "")
+                q_low = question.lower()
+                is_order_cnt_q = any(k in q_low for k in ["mấy đơn", "may don", "nhiêu đơn", "nhieu don", "bao nhiêu đơn", "bao nhiu don", "bn đơn", "bn don", "số đơn", "so don", "mấy hóa đơn", "mấy phiếu", "mấy gd"])
+                p1_has_distinct = "COUNT(DISTINCT" in p1_code_str.upper()
+                p2_has_distinct = "COUNT(DISTINCT" in p2_code_str.upper()
+
+                if pred1.get("type") == "number" and is_order_cnt_q and p1_has_distinct and not p2_has_distinct:
+                    is_consensus = False
+                    final_pred = pred1
+                    decision_reason = "p1_distinct_semantic_arbitration"
+                else:
+                    is_consensus = False
+                    final_pred = {"id": qid, "type": "abstain"}
+                    decision_reason = "consensus_disagreement_abstain"
         elif p1_valid and not p2_valid:
             if self.arbitration_strategy == "adaptive":
                 # Prompt 1 (SQL) vượt qua toàn bộ guard an toàn, Prompt 2 lỗi kỹ thuật -> Giữ Prompt 1

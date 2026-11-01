@@ -165,8 +165,28 @@ def main() -> None:
 
     args = parse_args()
 
+    # Tự động sửa lỗi typo đường dẫn nếu người dùng truyền nhầm .../data nhưng shop nằm ở thư mục cha
+    if not args.data_root.exists() and args.data_root.name == "data" and args.data_root.parent.exists():
+        if any(args.data_root.parent.glob("dev_*")) or any(args.data_root.parent.glob("biz_*")):
+            print(f"ℹ️ [Path Correction] Phát hiện đường dẫn thừa '/data', tự động trỏ về: {args.data_root.parent}")
+            args.data_root = args.data_root.parent
+
     # Tự động ưu tiên thư mục preprocessed nếu có trên Google Drive hoặc thư mục làm việc
-    if str(args.data_root).rstrip("/\\").endswith("train/data") or not args.data_root.exists():
+    is_public_test = "public" in str(args.questions).lower() or "dev" in str(args.data_root).lower()
+    if is_public_test:
+        if str(args.data_root).rstrip("/\\").endswith("public_test/data") or not args.data_root.exists():
+            candidate_public_preprocessed = [
+                Path("/content/drive/MyDrive/public_test_preprocessed"),
+                Path("/content/drive/MyDrive/Datamate/public_test_preprocessed"),
+                Path("/content/drive/MyDrive/zaloAI/public_test_preprocessed"),
+                PROJECT_ROOT / "public_test_preprocessed",
+            ]
+            for candidate in candidate_public_preprocessed:
+                if candidate.exists() and candidate.is_dir() and any(candidate.glob("dev_*")):
+                    print(f"🚀 [Auto-Detect] Tự động phát hiện dữ liệu public_test tiền xử lý tối ưu tại: {candidate}")
+                    args.data_root = candidate
+                    break
+    elif str(args.data_root).rstrip("/\\").endswith("train/data") or not args.data_root.exists():
         candidate_preprocessed = [
             Path("/content/drive/MyDrive/train_preprocessed_full"),
             Path("/content/drive/MyDrive/train_preprocessed"),

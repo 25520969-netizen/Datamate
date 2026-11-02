@@ -153,7 +153,7 @@ class QwenCoderClient:
         api_key: Optional[str] = None,
         temperature: float = 0.0,
         max_tokens: int = 768,
-        request_timeout: float = 90.0,
+        request_timeout: float = 300.0,
         custom_generator: Optional[Callable[[List[Dict[str, str]]], str]] = None,
     ) -> None:
         self.backend = backend.lower().strip()
@@ -172,7 +172,14 @@ class QwenCoderClient:
         self.api_key = api_key or os.environ.get("QWEN_API_KEY", "EMPTY")
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.request_timeout = request_timeout
+        env_timeout = os.environ.get("QWEN_REQUEST_TIMEOUT")
+        if env_timeout:
+            try:
+                self.request_timeout = float(env_timeout)
+            except ValueError:
+                self.request_timeout = request_timeout
+        else:
+            self.request_timeout = request_timeout
         self.custom_generator = custom_generator
 
         self._session = requests.Session()
@@ -287,7 +294,8 @@ class QwenCoderClient:
                 except Exception as exc:
                     last_exc = exc
                     if call_attempt < 2:
-                        time.sleep(1.0 * (call_attempt + 1))
+                        sleep_s = 3.0 * (call_attempt + 1) if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)) else 1.0 * (call_attempt + 1)
+                        time.sleep(sleep_s)
             raise RuntimeError(f"OpenAI API call to {url} failed after 3 attempts: {last_exc}")
 
         if self.backend == "ollama":

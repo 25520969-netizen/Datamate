@@ -155,6 +155,12 @@ def parse_args() -> argparse.Namespace:
         default=42,
         help="Cố định random seed cho toàn bộ pipeline và mô hình LLM (mặc định: 42).",
     )
+    parser.add_argument(
+        "--request-timeout",
+        type=float,
+        default=300.0,
+        help="Thời gian chờ tối đa cho mỗi request tới LLM API (giây, mặc định: 300.0).",
+    )
     return parser.parse_args()
 
 
@@ -254,12 +260,14 @@ def main() -> None:
             backend="custom",
             model_name=args.model,
             custom_generator=mock_generator,
+            request_timeout=args.request_timeout,
         )
     else:
         llm_client = QwenCoderClient(
             backend=args.backend,
             model_name=args.model,
             api_base=args.api_base,
+            request_timeout=args.request_timeout,
         )
 
     print(f"Kiểm tra kết nối tới LLM endpoint ({llm_client.backend} @ {llm_client.api_base})...")

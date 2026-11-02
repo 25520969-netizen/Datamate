@@ -219,3 +219,83 @@ def test_baseline_deterministic_unanswerable_skips_llm(monkeypatch, tmp_path):
     assert client.call_count == 0
     assert details["decision_reason"] == "deterministic_unanswerable"
     assert "Kỳ hỏi nằm ngoài khoảng ngày" in pred["reason"]
+
+
+def test_qwen_coder_client_seed_passed_at_zero_temperature(monkeypatch):
+    """Xác nhận seed=42 được truyền đầy đủ vào payload OpenAI và Ollama ngay cả khi temperature=0.0."""
+    client_openai = QwenCoderClient(backend="openai", temperature=0.0)
+    captured_openai_payload = {}
+
+    class MockResponse:
+        status_code = 200
+        ok = True
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+        def raise_for_status(self):
+            pass
+
+    def mock_post(url, json=None, headers=None, timeout=None):
+        nonlocal captured_openai_payload
+        captured_openai_payload = json
+        return MockResponse()
+
+    monkeypatch.setattr(client_openai._session, "post", mock_post)
+    client_openai.generate([{"role": "user", "content": "hi"}], seed=42)
+
+    assert "seed" in captured_openai_payload
+    assert captured_openai_payload["seed"] == 42
+    assert captured_openai_payload["temperature"] == 0.0
+
+    # Ollama test
+    client_ollama = QwenCoderClient(backend="ollama", temperature=0.0)
+    captured_ollama_payload = {}
+
+    def mock_ollama_post(url, json=None, timeout=None):
+        nonlocal captured_ollama_payload
+        captured_ollama_payload = json
+        class MockOllamaResp:
+            status_code = 200
+            def json(self):
+                return {"message": {"content": "ollama ok"}}
+            def raise_for_status(self):
+                pass
+        return MockOllamaResp()
+
+    monkeypatch.setattr(client_ollama._session, "post", mock_ollama_post)
+    client_ollama.generate([{"role": "user", "content": "hi"}], seed=99)
+
+    assert "options" in captured_ollama_payload
+    assert captured_ollama_payload["options"].get("seed") == 99
+
+
+def test_datamate_agent_custom_seed_propagation(monkeypatch, tmp_path):
+    """Xác nhận seed cấu hình trong DataMateAgent lan truyền đúng tới P1 và P2."""
+    captured_seeds = []
+    class SeedCapturingClient:
+        backend = "mock"
+        model_name = "mock"
+        def health_check(self, timeout=5.0):
+            return True
+        def generate(self, messages, seed=42):
+            captured_seeds.append(seed)
+            return "```python\nresult = {'type': 'number', 'answer': 100}\n```"
+
+    client = SeedCapturingClient()
+    agent = DataMateAgent(
+        data_root=tmp_path,
+        calendar_path=tmp_path / "cal.csv",
+        rulebook_path=tmp_path / "rb.md",
+        llm_client=client,
+        seed=77,
+    )
+
+    q_obj = {"id": "q_seed", "business_id": "biz_01", "as_of_date": "2026-05-15", "question": "Hỏi seed?"}
+    monkeypatch.setattr(agent.store, "get_readme", lambda bid: "")
+    monkeypatch.setattr(agent.store, "load_tables", lambda bid: {})
+    monkeypatch.setattr(agent.store, "build_compact_schema_prompt", lambda bid, question="": "")
+    monkeypatch.setattr(agent.rule_engine, "detect_unanswerable_deterministic", lambda **kw: (False, ""))
+    monkeypatch.setattr(agent.sandbox, "execute", lambda code, **kw: {"ok": True, "result": {"type": "number", "answer": 100}})
+
+    pred, details = agent.answer_question_dual(q_obj)
+    assert set(captured_seeds) == {77, 77 + 58}  # 77 cho P1, 135 cho P2
+

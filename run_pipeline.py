@@ -149,15 +149,34 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Chạy mới toàn bộ câu hỏi, không tái sử dụng cache từ file output cũ.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Cố định random seed cho toàn bộ pipeline và mô hình LLM (mặc định: 42).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
+    import random
+    import numpy as np
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import shutil
 
     args = parse_args()
+
+    # Cố định random seed toàn cục để đảm bảo 100% tính tái lập kết quả
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    try:
+        import torch
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+    except ImportError:
+        pass
 
     # Tự động sửa lỗi typo đường dẫn nếu người dùng truyền nhầm .../data nhưng shop nằm ở thư mục cha
     if not args.data_root.exists() and args.data_root.name == "data" and args.data_root.parent.exists():
@@ -260,6 +279,7 @@ def main() -> None:
         verbose=args.verbose,
         consensus_mode=args.consensus_mode,
         arbitration_strategy=args.arbitration,
+        seed=args.seed,
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -1674,7 +1674,7 @@ class BusinessDataStore:
             con.register(tbl_name, df)
         return con, tables
 
-    def build_compact_schema_prompt(self, business_id: str, max_sample_rows: int = 0, question: str = "") -> str:
+    def build_compact_schema_prompt(self, business_id: str, max_sample_rows: int = 3, question: str = "") -> str:
         """
         Tạo Compact Schema Metadata + nội dung README.md của shop để đưa vào Prompt của LLM.
         Đảm bảo tổng độ dài gọn gàng (nằm gọn trong giới hạn 8192 token của vLLM cả khi retry).

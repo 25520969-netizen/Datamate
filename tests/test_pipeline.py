@@ -385,16 +385,14 @@ def test_subtotal_isolation_and_dynamic_entity_grounder():
         {"Mã đơn": "DH02", "Ngày": "01/05/2025", "Status": "Hoàn thành", "Tên": "Phở bò", "Tiền": 45000},
     ])
     cleaned = apply_rulebook_section8_cleaning(df_with_subtotal)
-    assert len(cleaned) == 4
+    # Dòng "Cộng ngày" bị loại bỏ hoàn toàn để không tính trùng doanh thu
+    assert len(cleaned) == 3
     # Dòng 0 và 1 thuộc đơn DH01
     assert cleaned.loc[0, "Mã đơn"] == "DH01"
     assert cleaned.loc[1, "Mã đơn"] == "DH01"
     assert cleaned.loc[1, "Status"] == "Hoàn thành"
-    # Dòng 2 là Subtotal: Mã đơn giữ nguyên NA, Status là 'Subtotal'
-    assert pd.isna(cleaned.loc[2, "Mã đơn"])
-    assert cleaned.loc[2, "Status"] == "Subtotal"
-    # Dòng 3 thuộc đơn DH02
-    assert cleaned.loc[3, "Mã đơn"] == "DH02"
+    # Dòng 2 thuộc đơn DH02
+    assert cleaned.loc[2, "Mã đơn"] == "DH02"
 
     # Lọc đơn hoàn thành chỉ ra đúng 3 món (tổng 100k), không bị cộng thừa dòng Subtotal 55k!
     valid_orders = cleaned[cleaned["Status"] == "Hoàn thành"]

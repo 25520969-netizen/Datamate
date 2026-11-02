@@ -252,8 +252,8 @@ class QwenCoderClient:
                 "temperature": self.temperature,
                 "max_tokens": self.max_tokens,
             }
-            # Chỉ truyền seed khi sampling (temperature > 0) để tương thích vLLM OpenAI API
-            if seed is not None and self.temperature > 0:
+            # Cố định seed cho vLLM / OpenAI API để đảm bảo tính tất định cao nhất
+            if seed is not None:
                 payload["seed"] = seed
 
             last_exc: Optional[Exception] = None
@@ -301,7 +301,7 @@ class QwenCoderClient:
                     "num_predict": self.max_tokens,
                 },
             }
-            if seed is not None and self.temperature > 0:
+            if seed is not None:
                 payload["options"]["seed"] = seed
             resp = self._session.post(url, json=payload, timeout=self.request_timeout)
             resp.raise_for_status()
@@ -317,7 +317,10 @@ class QwenCoderClient:
             )
             model_inputs = self._hf_tokenizer([text], return_tensors="pt").to(self._hf_model.device)
             import torch  # type: ignore
-            torch.manual_seed(seed)
+            if seed is not None:
+                torch.manual_seed(seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed)
             with torch.no_grad():
                 generated_ids = self._hf_model.generate(
                     **model_inputs,
@@ -356,6 +359,7 @@ class DataMateAgent:
         verbose: bool = False,
         consensus_mode: str = "dual",
         arbitration_strategy: str = "strict",
+        seed: int = 42,
     ) -> None:
         self.store = BusinessDataStore(data_root=data_root, cache_root=cache_root)
         self.date_resolver = DateResolver(calendar_path=calendar_path)
@@ -374,6 +378,7 @@ class DataMateAgent:
         self.verbose = verbose
         self.consensus_mode = consensus_mode.lower().strip()
         self.arbitration_strategy = arbitration_strategy.lower().strip()
+        self.seed = seed
 
     def build_user_prompt(
         self,
@@ -419,6 +424,56 @@ class DataMateAgent:
         ])
         return "\n\n".join(parts)
 
+    def arbitrate_safe_tournament(
+        self,
+        question: str,
+        as_of_date: str,
+        code1: str,
+        ans1: Any,
+        code2: str,
+        ans2: Any,
+    ) -> Optional[int]:
+        """
+        Reasoning Referee đối đầu theo nguyên tắc Agentar-Scale-SQL kết hợp Safe Abstain.
+        Chỉ trả về 1 (chọn P1) hoặc 2 (chọn P2) khi phát hiện rõ ràng một bên vi phạm quy tắc Rulebook:
+          - Vi phạm chặn ngày hiện tại (quên lọc date <= as_of_date).
+          - Tính nhầm đơn hủy / trả hàng.
+          - Tính nhầm khách lẻ / khách vãng lai.
+          - Dính lỗi Cartesian product bloat do JOIN.
+        Nếu cả hai bên đều không có vi phạm rõ ràng hoặc không chắc chắn -> Trả về None (kích hoạt Safe Abstain 0 điểm).
+        """
+        referee_prompt = (
+            f"Bạn là trọng tài thẩm định truy vấn dữ liệu theo Rulebook 2026. Hãy kiểm tra 2 phương án truy vấn sau:\n"
+            f"Câu hỏi: {question}\n"
+            f"Ngày hiện tại (as_of_date): {as_of_date}\n\n"
+            f"--- Phương án 1 ---\n"
+            f"Code:\n{code1[:600]}\n"
+            f"Kết quả: {ans1}\n\n"
+            f"--- Phương án 2 ---\n"
+            f"Code:\n{code2[:600]}\n"
+            f"Kết quả: {ans2}\n\n"
+            f"Quy tắc nghiệp vụ cốt lõi:\n"
+            f"1. Mọi giao dịch phát sinh sau ngày hiện tại ({as_of_date}) coi như chưa xảy ra.\n"
+            f"2. Doanh thu không tính đơn hủy/trả hàng, không trừ voucher cả đơn, không cộng VAT/ship.\n"
+            f"3. Khách lẻ/vãng lai không phải khách hàng, không được tính vào xếp hạng khách.\n\n"
+            f"Hãy xem xét: Có phương án nào vi phạm rõ ràng một trong các quy tắc trên không?\n"
+            f"- Nếu Phương án 1 đúng và Phương án 2 vi phạm: trả về '\\boxed{{1}}'\n"
+            f"- Nếu Phương án 2 đúng và Phương án 1 vi phạm: trả về '\\boxed{{2}}'\n"
+            f"- Nếu không có vi phạm rõ ràng hoặc không chắc chắn bên nào đúng: BẮT BUỘC trả về '\\boxed{{ABSTAIN}}'."
+        )
+        try:
+            decision = self.llm_client.generate([
+                {"role": "system", "content": "Bạn là chuyên gia thẩm định SQL khách quan. Trả lời cực kỳ thận trọng."},
+                {"role": "user", "content": referee_prompt}
+            ], seed=42)
+            if "\\boxed{1}" in decision and "\\boxed{2}" not in decision and "ABSTAIN" not in decision.upper():
+                return 1
+            if "\\boxed{2}" in decision and "\\boxed{1}" not in decision and "ABSTAIN" not in decision.upper():
+                return 2
+        except Exception:
+            pass
+        return None
+
     def _solve_single_prompt(
         self,
         system_prompt: str,
@@ -461,32 +516,36 @@ class DataMateAgent:
             )
             last_raw = exec_outcome.get("result")
 
+            candidate_pred = None
             if exec_outcome.get("ok") and last_raw is not None:
-                final_pred = postprocess_and_guard(
+                candidate_pred = postprocess_and_guard(
                     question_id=qid,
                     question=question,
                     raw_output=last_raw,
                     expected_type=expected_type,
                 )
-                return final_pred, last_code, last_raw
+                if candidate_pred.get("type") != "abstain":
+                    return candidate_pred, last_code, last_raw
 
-            err_msg = exec_outcome.get("error") or "Biến `result` có giá trị `None` sau khi chạy code."
+            if not exec_outcome.get("ok"):
+                err_msg = exec_outcome.get("error") or "Lỗi cú pháp hoặc lỗi thực thi trong DuckDB/Sandbox."
+            elif candidate_pred is not None and candidate_pred.get("type") == "abstain":
+                err_msg = "Mã chạy không lỗi nhưng kết quả trả về rỗng (None hoặc không có dòng nào). Hãy kiểm tra lại điều kiện WHERE (như ngày tháng, so khớp chuỗi ILIKE) để đảm bảo không lọc mất toàn bộ dữ liệu."
+            else:
+                err_msg = "Biến `result` có giá trị `None` sau khi chạy code."
+
             last_error = f"Sandbox Error: {err_msg}"
             if attempt < self.max_retries:
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt[:8000]},
-                    {"role": "assistant", "content": llm_reply[:1500]},
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Đoạn mã Python trên gặp lỗi khi chạy trong Sandbox:\n"
-                            f"```text\n{err_msg[:1200]}\n```\n"
-                            f"Hãy kiểm tra lại đúng tên bảng và tên cột chính xác trong schema, "
-                            f"sau đó viết lại khối ```python ... ``` sửa lỗi hoàn chỉnh."
-                        ),
-                    },
-                ]
+                messages.append({"role": "assistant", "content": llm_reply})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Đoạn mã Python/SQL trên gặp lỗi khi chạy trong cơ sở dữ liệu:\n"
+                        f"```text\n{err_msg[:1200]}\n```\n"
+                        f"Hãy phân tích nguyên nhân lỗi (sai tên bảng/cột, sai cú pháp ngày, rỗng dữ liệu) "
+                        f"và viết lại khối lệnh ```python ... ``` hoàn chỉnh để khắc phục chính xác lỗi trên."
+                    ),
+                })
 
         return {"id": qid, "type": "abstain", "error": last_error}, last_code, last_raw
 
@@ -613,7 +672,7 @@ class DataMateAgent:
                 date_ctx=date_ctx,
                 expected_type=expected_type,
                 question=question,
-                seed=42,
+                seed=self.seed,
             )
             p1_valid = _is_meaningful_pred(pred1)
             final_pred = pred1 if p1_valid else {"id": qid, "type": "abstain"}
@@ -648,7 +707,7 @@ class DataMateAgent:
                 date_ctx=date_ctx,
                 expected_type=expected_type,
                 question=question,
-                seed=42,
+                seed=self.seed,
             )
             fut2 = executor.submit(
                 self._solve_single_prompt,
@@ -660,7 +719,7 @@ class DataMateAgent:
                 date_ctx=date_ctx,
                 expected_type=expected_type,
                 question=question,
-                seed=100,
+                seed=self.seed + 58,
             )
             pred1, code1, raw1 = fut1.result()
             pred2, code2, raw2 = fut2.result()
@@ -778,6 +837,27 @@ class DataMateAgent:
                         is_consensus = True
                         final_pred = {"id": qid, "type": "number", "answer": round_half_up_int(p1_num)}
                         decision_reason = "post_rounding_consensus"
+                    elif self.arbitration_strategy in ("tournament", "adaptive"):
+                        referee_choice = self.arbitrate_safe_tournament(
+                            question=question,
+                            as_of_date=as_of_date,
+                            code1=p1_code_str,
+                            ans1=p1_num,
+                            code2=p2_code_str,
+                            ans2=p2_num,
+                        )
+                        if referee_choice == 1:
+                            is_consensus = False
+                            final_pred = pred1
+                            decision_reason = "tournament_referee_p1"
+                        elif referee_choice == 2:
+                            is_consensus = False
+                            final_pred = pred2
+                            decision_reason = "tournament_referee_p2"
+                        else:
+                            is_consensus = False
+                            final_pred = {"id": qid, "type": "abstain"}
+                            decision_reason = "consensus_disagreement_abstain"
                     else:
                         is_consensus = False
                         final_pred = {"id": qid, "type": "abstain"}
@@ -865,6 +945,10 @@ class DataMateAgent:
                 is_consensus = False
                 final_pred = pred2
                 decision_reason = "p2_cancel_rate_guard_arbitration"
+            elif self.arbitration_strategy in ("tournament", "adaptive"):
+                is_consensus = False
+                final_pred = pred2
+                decision_reason = "p2_valid_p1_failed_fallback"
             else:
                 final_pred = {"id": qid, "type": "abstain"}
                 decision_reason = "p2_only_rejected_abstain"

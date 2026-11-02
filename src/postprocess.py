@@ -259,38 +259,6 @@ def postprocess_and_guard(
         else:
             final_num = round_half_up_2dec(float(ans_val))
 
-        # Sanity Guard 1: Nhầm số lượng thành doanh thu
-        # Câu hỏi hỏi số lượng sản phẩm/nồi/đĩa/kg/ly/chai/hộp/lon mà kết quả > 20,000 (do model sum Thành tiền)
-        if any(k in q_low for k in ["mấy nồi", "mấy đĩa", "mấy ly", "mấy lon", "mấy kg", "mấy chai", "mấy hộp", "may noi", "may dia", "may ly", "may lon", "may kg", "may chai", "may hop", "bao nhiêu nồi", "bao nhiêu đĩa", "bao nhiêu ly", "bao nhiêu lon", "bao nhiêu kg", "bao nhiêu chai", "bao nhiêu hộp", "số lượng", "số kg", "so kg", "số lượng kg", "số lon", "so lon", "số chai", "so chai", "số hộp", "so hop", "số gói", "so goi", "số cái", "so cai", "số đĩa", "so dia", "số nồi", "so noi"]) and not any(k in q_low for k in ["tiền", "đồng", "doanh thu", "dthu", "giá"]):
-            if final_num > 20000:
-                return abstain_resp
-
-        # Sanity Guard 2: Lọc sót ngày dẫn tới cộng dồn toàn bộ doanh thu shop (> 500 triệu cho 1 ngày duy nhất)
-        # Chỉ áp dụng khi câu hỏi thực sự chỉ hỏi 1 ngày đơn lẻ, KHÔNG áp dụng cho các kỳ dài (đầu năm, năm nay, tháng, 30 ngày...)
-        long_period_keywords = (
-            "đầu năm", "dau nam", "năm nay", "nam nay", "cả năm", "ca nam",
-            "30 ngày", "30 ngay", "tháng", "thang", "tuần", "tuan", "giai đoạn",
-            "khoảng", "khoang", "kể từ", "ke tu", "từ ngày", "tu ngay"
-        )
-        is_single_day_q = any(k in q_low for k in ["riêng hôm nay", "trong ngày hôm nay", "doanh thu hôm nay", "dthu hôm nay", "hôm qua", "hom qua", "bữa qua", "bua qua"]) or (
-            any(k in q_low for k in ["hôm nay", "hnay", "hom ni", "bữa nay", "bua nay"]) and not any(lp in q_low for lp in long_period_keywords)
-        )
-        if is_single_day_q and final_num > 500000000:
-            return abstain_resp
-
-        # Sanity Guard 3: Nếu câu hỏi về doanh thu / số đơn phát sinh trong ngày/tuần/tháng đang hoạt động,
-        # hoặc số lượng sản phẩm / khách nợ mà ra 0 thì thường do không khớp chuỗi hoặc lọc ngày rỗng -> abstain an toàn
-        if final_num == 0:
-            if any(k in q_clean for k in [
-                "hom nay", "hnay", "hom ni", "bua nay", "rieng hom nay", "doanh thu hom", "dthu hom", "duoc may don", "may dh",
-                "may noi", "may dia", "may ly", "may lon", "may kg", "may chai", "may hop",
-                "bao nhieu noi", "bao nhieu dia", "bao nhieu ly", "bao nhieu lon", "bao nhieu kg", "bao nhieu chai", "bao nhieu hop",
-                "bao nhiu noi", "bao nhiu dia", "bao nhiu ly", "bao nhiu lon", "bao nhiu kg", "bao nhiu chai", "bao nhiu hop",
-                "bao nhieu tien", "bao nhiu tien", "bnhiu tien", "bn tien",
-                "so khach con cong no", "khach con cong no"
-            ]):
-                return abstain_resp
-
         return {"id": question_id, "type": "number", "answer": final_num}
 
     # 2. Xử lý PERCENT
@@ -318,21 +286,9 @@ def postprocess_and_guard(
 
         final_pct = round_half_up_2dec(float(ans_val))
 
-        # Sanity Guard 4: Tỉ trọng / Tỉ lệ đóng góp không thể vượt quá 100% hoặc nhỏ hơn 0%
+        # Sanity Guard: Tỉ trọng / Tỉ lệ đóng góp không thể vượt quá 100% hoặc nhỏ hơn 0%
         if any(k in q_clean for k in ["chiem", "ti trong", "ty trong", "dong gop", "ti le don huy", "ti le huy"]):
             if final_pct > 100.0 or final_pct < 0.0:
-                return abstain_resp
-
-        # Sanity Guard 5: Tăng/giảm, tỉ lệ hủy, hoặc tỉ trọng % ra đúng 0.0% thường do lọc sót đơn hủy hoặc rỗng
-        if final_pct == 0.0:
-            if any(k in q_clean for k in [
-                "thay doi", "tang hay giam", "tang giam",
-                "ti le don huy", "ti le huy", "ti le huy don", "ti le don bi huy",
-                "chiem bao nhieu %", "chiem bn %", "dong gop bn %", "dong gop bao nhieu %",
-                "chiem bnhiu %", "chiem bao nhiu %",
-                "chiem bao nhieu phan tram", "chiem bao nhiu phan tram", "chiem bn phan tram",
-                "tra bang tm", "tien mat", "chuyen khoan", "vi dien tu"
-            ]):
                 return abstain_resp
 
         return {"id": question_id, "type": "percent", "answer": final_pct}

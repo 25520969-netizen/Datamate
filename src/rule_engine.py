@@ -282,6 +282,7 @@ class RuleEngine:
         Lưu ý: Đây là gợi ý cho LLM; kiểu cuối cùng có thể được code Python tự xác định hoặc chuẩn hóa.
         """
         q = RuleEngine.normalize_telex_typos(question.lower().strip())
+        q_no_acc = strip_accents(q)
 
         # 1. Table: bảng / mỗi ... kèm số tiền / danh sách ... và doanh thu/số tiền/số lượng/công nợ
         if (
@@ -392,24 +393,25 @@ class RuleEngine:
         # 5. List:
         # a. Hỏi 2 hoặc nhiều giá trị: "mỗi loại bao nhiêu", "lần lượt là bao nhiêu", "theo thứ tự đó", "mấy ... chẵn ... lẻ", "tuổi nợ"
         # hoặc nhiều vế câu hỏi bao nhiêu, hoặc 2 doanh thu nối bằng "và" / "va"
+        list_kw_regex = (
+            r"\b(mỗi loại bao nhiêu|mỗi loại bn|mỗi bên bao nhiêu|mỗi bên bn|mỗi thứ bao nhiêu|mỗi thứ bn|"
+            r"moi loai bnhiu|moi loai bn|moi loai bao nhieu|moi ben bn|moi ben bao nhieu|"
+            r"mỗi tháng là bao nhiêu|mỗi tháng là bnhiu|mỗi tháng bnhiu|moi thang la bao nhieu|moi thang la bnhiu|"
+            r"lần lượt là bao nhiêu|lần lượt là bn|lần lượt theo thứ tự|theo thứ tự đó|theo thứ tự thời gian|theo thu tu thoi gian|"
+            r"ghi (?:hai|ba|[2-9]) số|ghi (?:hai|ba|[2-9]) so|hai số|2 số|ba số|3 số|trả lời hai số|tra loi hai so|trả lời 2 số|tra loi 2 so|"
+            r"ghi lần lượt|ghi lan luot|"
+            r"chẵn.*lẻ|chan.*le|hộp chẵn|vỉ chẵn|thùng chẵn|"
+            r"tuổi nợ|tuoi no|"
+            r"từ tháng cũ đến tháng mới|tu thang cu den thang moi)\b"
+        )
         if (
-            re.search(
-                r"\b(mỗi loại bao nhiêu|mỗi loại bn|mỗi bên bao nhiêu|mỗi bên bn|mỗi thứ bao nhiêu|mỗi thứ bn|"
-                r"moi loai bnhiu|moi loai bn|moi loai bao nhieu|moi ben bn|moi ben bao nhieu|"
-                r"mỗi tháng là bao nhiêu|mỗi tháng là bnhiu|mỗi tháng bnhiu|moi thang la bao nhieu|moi thang la bnhiu|"
-                r"lần lượt là bao nhiêu|lần lượt là bn|lần lượt theo thứ tự|theo thứ tự đó|theo thứ tự thời gian|theo thu tu thoi gian|"
-                r"ghi (?:hai|ba|[2-9]) số|ghi (?:hai|ba|[2-9]) so|hai số|2 số|ba số|3 số|trả lời hai số|tra loi hai so|trả lời 2 số|tra loi 2 so|"
-                r"ghi lần lượt|ghi lan luot|"
-                r"chẵn.*lẻ|chan.*le|hộp chẵn|vỉ chẵn|thùng chẵn|"
-                r"tuổi nợ|tuoi no|"
-                r"từ tháng cũ đến tháng mới|tu thang cu den thang moi)\b",
-                q,
-            )
-            or len(re.findall(r"\b(?:bao\s*(?:nhiêu|nhiu)|bn|bnhiu)\b", q)) >= 2
-            or re.search(r"(?:dthu|doanh thu|tiền|tien).*?\b(?:và|va)\b.*?(?:dthu|doanh thu|tiền|tien)", q)
-            or re.search(r"(?:dthu|doanh thu|tiền|tien).*?[,;]\s*(?:doanh thu|dthu|tiền|tien)", q)
+            re.search(list_kw_regex, q)
+            or re.search(list_kw_regex, q_no_acc)
+            or len(re.findall(r"\b(?:bao\s*(?:nhiêu|nhieu|nhiu)|bn|bnhiu)\b", q_no_acc)) >= 2
+            or re.search(r"(?:dthu|doanh thu|tiền|tien).*?\b(?:và|va)\b.*?(?:dthu|doanh thu|tiền|tien)", q_no_acc)
+            or re.search(r"(?:dthu|doanh thu|tiền|tien).*?[,;]\s*(?:doanh thu|dthu|tiền|tien)", q_no_acc)
             or re.search(r"(?:ghi\s*)?nợ\s*thêm.*?trả\s*(?:nợ\s*)?(?:được|dc|duoc)", q)
-            or re.search(r"(?:no them|ghi no them).*?(?:tra dc|tra duoc)", q)
+            or re.search(r"(?:no them|ghi no them).*?(?:tra dc|tra duoc)", q_no_acc)
         ):
             return "list"
 
@@ -498,9 +500,13 @@ class RuleEngine:
 
         # 3. Kiến thức y khoa / liều dùng / tác dụng phụ / chống chỉ định ngoài dữ liệu
         if any(k in q for k in ["uống mỗi lần", "liều dùng", "cách dùng", "uống bao nhiêu viên", "uống mấy gói"]):
-            return True, "Liều dùng y tế là kiến thức bên ngoài, không ghi trong dữ liệu danh mục hàng."
+            has_dosage_col = any(any(k in c for k in ["cách dùng", "cach_dung", "liều dùng", "lieu_dung", "hướng dẫn", "huong_dan"]) for c in all_cols)
+            if not has_dosage_col:
+                return True, "Liều dùng y tế là kiến thức bên ngoài, không ghi trong dữ liệu danh mục hàng."
         if any(k in q for k in ["tác dụng phụ", "tac dung phu", "chống chỉ định", "chong chi dinh", "dị ứng", "di ung", "tương tác thuốc"]):
-            return True, "Tác dụng phụ và chống chỉ định y tế là kiến thức dược lý bên ngoài, không có trong dữ liệu bán hàng."
+            has_contra_col = any(any(k in c for k in ["tác dụng phụ", "chống chỉ định", "chong_chi_dinh", "tac_dung_phu"]) for c in all_cols)
+            if not has_contra_col:
+                return True, "Tác dụng phụ và chống chỉ định y tế là kiến thức dược lý bên ngoài, không có trong dữ liệu bán hàng."
 
         # 4. Lý do hủy đơn hàng
         if any(k in q for k in ["vì giao trễ", "vi giao tre", "lý do hủy", "lý do huỷ", "lí do hủy", "lí do huỷ", "ly do huy", "li do"]):

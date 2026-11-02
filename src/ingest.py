@@ -1674,7 +1674,7 @@ class BusinessDataStore:
             con.register(tbl_name, df)
         return con, tables
 
-    def build_compact_schema_prompt(self, business_id: str, max_sample_rows: int = 3, question: str = "") -> str:
+    def build_compact_schema_prompt(self, business_id: str, max_sample_rows: int = 1, question: str = "") -> str:
         """
         Tạo Compact Schema Metadata + nội dung README.md của shop để đưa vào Prompt của LLM.
         Đảm bảo tổng độ dài gọn gàng (nằm gọn trong giới hạn 8192 token của vLLM cả khi retry).
@@ -1856,8 +1856,8 @@ class BusinessDataStore:
                 sample_records = rep_df.head(max_sample_rows).to_dict(orient="records")
                 for r in sample_records:
                     row_json = json.dumps(r, ensure_ascii=False, default=str)
-                    if len(row_json) > 350:
-                        row_json = row_json[:347] + "..."
+                    if len(row_json) > 250:
+                        row_json = row_json[:247] + "..."
                     lines.append(f"  -- Mẫu: {row_json}")
 
         if omitted_table_names:

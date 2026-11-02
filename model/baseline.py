@@ -487,9 +487,12 @@ class DataMateAgent:
         seed: int = 42,
     ) -> Tuple[Dict[str, Any], str, Any]:
         """Thực thi một luồng prompt độc lập kèm vòng lặp tự sửa lỗi nếu crash."""
+        # Safeguard: Đảm bảo user_prompt không vượt quá giới hạn an toàn tránh lỗi 400 Context Length Overflow
+        safe_user_prompt = user_prompt if len(user_prompt) <= 14000 else user_prompt[:14000] + "\n\n/* (Đã rút gọn để đảm bảo trong ngưỡng context window) */"
+
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
+            {"role": "user", "content": safe_user_prompt},
         ]
         last_code = ""
         last_raw = None
@@ -505,6 +508,12 @@ class DataMateAgent:
                 print(f"    ⚠️ [LLM Error] {qid} ({business_id}, attempt {attempt+1}/{total_attempts}): {llm_exc}", flush=True)
                 if attempt < self.max_retries:
                     time.sleep(1.0 * (attempt + 1))
+                    # Tự động nén prompt nếu lỗi do context length vượt ngưỡng giới hạn của vLLM
+                    err_str = str(llm_exc).lower()
+                    if any(k in err_str for k in ["maximum context length", "exceeds this limit", "input_tokens", "reduce the length", "400"]):
+                        for msg in messages:
+                            if msg.get("role") == "user" and len(msg.get("content", "")) > 5000:
+                                msg["content"] = msg["content"][:5000] + "\n\n/* Lưu ý: Prompt đã được tự động nén để vừa context window của LLM. */"
                     continue
                 return {"id": qid, "type": "abstain", "error": last_error}, last_code, None
 

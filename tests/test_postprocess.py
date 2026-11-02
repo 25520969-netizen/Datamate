@@ -105,11 +105,21 @@ def test_clean_entity_label_annotations():
     assert clean_entity_label("Nước muối sinh lý (500ml)") == "Nước muối sinh lý (500ml)"
 
 
-def test_postprocess_sanity_guard_excessive_quantity():
-    # Hỏi mấy ly mà Sandbox trả về 5,000,000 (do sum nhầm cột Thành tiền thay vì Số lượng)
-    # Sanity guard phải bắt được và trả về abstain để bảo toàn điểm
-    p = postprocess_and_guard("q_sanity", "Bán được mấy ly trà sữa?", 5000000, "number")
-    assert p["type"] == "abstain"
+def test_postprocess_preserves_zero_and_wholesale_quantities():
+    # Số 0 là đáp án hợp lệ (ví dụ: hôm nay đóng cửa không bán được đơn nào, doanh thu = 0)
+    p_zero = postprocess_and_guard("q_zero", "Hôm nay doanh thu bán hàng là bao nhiêu tiền?", 0, "number")
+    assert p_zero["type"] == "number"
+    assert p_zero["answer"] == 0
+
+    # 0.0% là đáp án hợp lệ (ví dụ: không có đơn hủy nào -> tỉ lệ hủy là 0.0%)
+    p_zero_pct = postprocess_and_guard("q_zero_pct", "Tỉ lệ đơn hủy là bao nhiêu %?", 0.0, "percent")
+    assert p_zero_pct["type"] == "percent"
+    assert p_zero_pct["answer"] == 0.0
+
+    # Bán sỉ số lượng lớn (> 20.000) không bị chặn oan uổng
+    p_wholesale = postprocess_and_guard("q_ws", "Bán được bao nhiêu viên gạch?", 50000, "number")
+    assert p_wholesale["type"] == "number"
+    assert p_wholesale["answer"] == 50000
 
 
 def test_postprocess_round_half_up_negative():
@@ -134,3 +144,53 @@ def test_postprocess_table_dict_dataframe_cleaning():
     assert p["type"] == "table"
     assert p["answer"]["columns"] == ["Món", "Giá"]
     assert len(p["answer"]["rows"]) == 2
+
+
+def test_postprocess_scalar_nested_tuple_unpacking():
+    # DuckDB fetchall() trả về [(1500000,)]
+    p_num = postprocess_and_guard("q_tup1", "Doanh thu bao nhiêu tiền?", [(1500000,)], "number")
+    assert p_num["type"] == "number"
+    assert p_num["answer"] == 1500000
+
+    # Lồng nhau dạng list [[25.5]] cho percent
+    p_pct = postprocess_and_guard("q_tup2", "Tỉ lệ hủy bao nhiêu %?", [[25.5]], "percent")
+    assert p_pct["type"] == "percent"
+    assert p_pct["answer"] == 25.5
+
+    # Lồng nhau dạng [('2026-05-15',)] cho date
+    p_date = postprocess_and_guard("q_tup3", "Ngày nào bán chạy nhất?", [("2026-05-15",)], "date")
+    assert p_date["type"] == "date"
+    assert p_date["answer"] == "2026-05-15"
+
+    # Lồng nhau dạng [(True,)] cho boolean
+    p_bool = postprocess_and_guard("q_tup4", "Có đúng không?", [(True,)], "boolean")
+    assert p_bool["type"] == "boolean"
+    assert p_bool["answer"] is True
+
+    # Lồng nhau dạng [('Trà sữa',)] cho string
+    p_str = postprocess_and_guard("q_tup5", "Món nào bán chạy nhất?", [("Trà sữa",)], "string")
+    assert p_str["type"] == "string"
+    assert p_str["answer"] == "Trà sữa"
+
+
+def test_postprocess_string_currency_cleaning():
+    p1 = postprocess_and_guard("q_curr1", "Tổng doanh thu bao nhiêu?", "1.500.000 VNĐ", "number")
+    assert p1["type"] == "number"
+    assert p1["answer"] == 1500000
+
+    p2 = postprocess_and_guard("q_curr2", "Tổng doanh thu?", "2,450,000.00", "number")
+    assert p2["type"] == "number"
+    assert p2["answer"] == 2450000
+
+
+def test_check_consensus_post_rounding():
+    # 2 kết quả lệch số thập phân nhưng sau khi làm tròn về đồng (Mục 9 Rulebook) thì giống nhau
+    p1 = {"type": "number", "answer": 5000000.4}
+    p2 = {"type": "number", "answer": 5000000.1}
+    assert check_consensus(p1, p2)
+
+    # 2 kết quả phần trăm làm tròn 2 chữ số thập phân giống nhau
+    p3 = {"type": "percent", "answer": 12.341}
+    p4 = {"type": "percent", "answer": 12.344}
+    assert check_consensus(p3, p4)
+

@@ -10,6 +10,7 @@ from src.ingest import (
     to_nfc,
     apply_rulebook_section8_cleaning,
     BusinessDataStore,
+    normalize_date_value_iso,
 )
 
 
@@ -150,3 +151,32 @@ def test_fill_down_preserves_non_order_columns():
     assert cleaned.loc[1, "Mã đơn"] == "HD01"
     # Đơn vị tính là item-level -> không bị fill-down nhầm!
     assert pd.isna(cleaned.loc[1, "Đơn vị tính"])
+
+
+def test_normalize_date_value_iso_and_auto_swap():
+    # Chuẩn DD/MM/YYYY
+    assert normalize_date_value_iso("25/12/2025") == "2025-12-25"
+    # Hoán vị MM/DD/YYYY khi ngày > 12 nằm ở giữa
+    assert normalize_date_value_iso("05/20/2025") == "2025-05-20"
+    # Chuẩn ISO giữ nguyên
+    assert normalize_date_value_iso("2026-03-15") == "2026-03-15"
+    # Chuẩn có giờ phút giữ nguyên giờ để phân tích ca làm việc
+    assert normalize_date_value_iso("2026-03-15 14:30:00") == "2026-03-15 14:30:00"
+    # Giờ midnight (00:00:00) rút gọn về YYYY-MM-DD
+    assert normalize_date_value_iso("2026-03-15 00:00:00") == "2026-03-15"
+
+
+def test_enrich_table_synonyms_adds_date_iso():
+    df = pd.DataFrame({
+        "Mã đơn": ["HD01", "HD02"],
+        "Ngày bán": ["15/05/2026", "20/05/2026"],
+        "Thành tiền": [100000, 200000],
+    })
+    tables = {"ban_hang": df}
+    enriched = BusinessDataStore._enrich_table_synonyms_and_id(tables, business_id="biz_test")
+    res_df = enriched["ban_hang"]
+    assert "date_iso" in res_df.columns
+    assert list(res_df["date_iso"]) == ["2026-05-15", "2026-05-20"]
+    assert "order_date_iso" in res_df.columns
+    assert list(res_df["order_date_iso"]) == ["2026-05-15", "2026-05-20"]
+

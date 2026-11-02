@@ -34,10 +34,11 @@ def test_guard2_allows_multi_day_high_revenue():
     assert res_30d["type"] == "number"
     assert res_30d["answer"] == 1457273700
 
-    # Nhưng câu hỏi 1 ngày duy nhất (hôm nay / hôm qua) > 500M vẫn bị kích hoạt ABSTAIN do nghi ngờ sum nhầm toàn shop
+    # Câu hỏi 1 ngày doanh thu lớn (> 500M) từ shop bán buôn / VLXD không bị chặn oan
     q_single = "riêng hôm nay doanh thu là bao nhiêu?"
     res_single = postprocess_and_guard("q3", q_single, 600000000, "number")
-    assert res_single["type"] == "abstain"
+    assert res_single["type"] == "number"
+    assert res_single["answer"] == 600000000
 
 
 def test_fuzzy_date_context_two_weeks():

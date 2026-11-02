@@ -159,3 +159,52 @@ def test_rulebook_knob_reader_default_structure(tmp_path):
     knobs = RuleEngine.read_rulebook_knobs(tmp_path / "non_existent.md")
     assert isinstance(knobs, dict)
     assert "vat_rate" in knobs or "cancel_status" in knobs or "shift" in knobs or len(knobs) >= 0
+
+
+def test_detect_unanswerable_expanded_domains():
+    store = DummyStore()
+    d_res = DummyDateResolver()
+
+    # 1. Nhiệt độ / độ ẩm kho
+    q_temp = {"question": "Kho thuốc bảo quản ở nhiệt độ bao nhiêu độ?", "business_id": "biz_01", "as_of_date": "2025-12-31"}
+    is_unans, reason = RuleEngine.detect_unanswerable_deterministic(q_temp, store, d_res)
+    assert is_unans
+    assert "nhiệt độ" in reason.lower()
+
+    # 2. Tác dụng phụ thuốc y tế
+    q_side_effects = {"question": "Thuốc này có tác dụng phụ gì không?", "business_id": "biz_01", "as_of_date": "2025-12-31"}
+    is_unans, reason = RuleEngine.detect_unanswerable_deterministic(q_side_effects, store, d_res)
+    assert is_unans
+    assert "tác dụng phụ" in reason.lower() or "dược lý" in reason.lower()
+
+    # 3. Khoảng cách địa lý / Google Maps
+    q_maps = {"question": "Quán cách bến xe bao xa theo Google Maps?", "business_id": "biz_01", "as_of_date": "2025-12-31"}
+    is_unans, reason = RuleEngine.detect_unanswerable_deterministic(q_maps, store, d_res)
+    assert is_unans
+    assert "tọa độ" in reason.lower() or "địa lý" in reason.lower()
+
+    # 4. Thời tiết / khí tượng
+    q_weather = {"question": "Hôm nay trời mưa hay nắng?", "business_id": "biz_01", "as_of_date": "2025-12-31"}
+    is_unans, reason = RuleEngine.detect_unanswerable_deterministic(q_weather, store, d_res)
+    assert is_unans
+    assert "thời tiết" in reason.lower()
+
+    # 5. Vé tàu xe / chuyến bay
+    q_flight = {"question": "Có bao nhiêu chuyến bay từ Hà Nội vào?", "business_id": "biz_01", "as_of_date": "2025-12-31"}
+    is_unans, reason = RuleEngine.detect_unanswerable_deterministic(q_flight, store, d_res)
+    assert is_unans
+    assert "vận tải" in reason.lower() or "lịch trình" in reason.lower()
+
+
+def test_detect_unanswerable_future_sales():
+    store = DummyStore()
+    class FutureDateResolver:
+        def resolve(self, q, as_of):
+            # Ngày mai: 2025-06-01 khi as_of là 2025-05-31
+            return {"detected_periods": [{"start_date": "2025-06-01", "end_date": "2025-06-01"}]}
+
+    q_future = {"question": "Doanh thu bán được ngày mai?", "business_id": "biz_01", "as_of_date": "2025-05-31"}
+    is_unans, reason = RuleEngine.detect_unanswerable_deterministic(q_future, store, FutureDateResolver())
+    assert is_unans
+    assert "tương lai" in reason.lower()
+

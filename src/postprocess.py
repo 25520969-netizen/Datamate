@@ -164,6 +164,9 @@ def strip_trailing_measurement_in_parens(s: str) -> str:
     return s.strip()
 
 
+clean_entity_label = strip_trailing_measurement_in_parens
+
+
 def postprocess_and_guard(
     question_id: str,
     question: str,
@@ -209,7 +212,10 @@ def postprocess_and_guard(
         }
 
     # Tự động suy luận lại type nếu raw_output mang kiểu dữ liệu rõ ràng khác với expected_type
-    if isinstance(ans_val, dict) and "columns" in ans_val and "rows" in ans_val:
+    if hasattr(ans_val, "columns") and hasattr(ans_val, "values"):
+        ans_type = "table"
+        ans_val = {"columns": [str(c) for c in ans_val.columns], "rows": ans_val.values.tolist()}
+    elif isinstance(ans_val, dict) and "columns" in ans_val and "rows" in ans_val:
         ans_type = "table"
     elif isinstance(ans_val, list) and len(ans_val) > 1 and ans_type not in ("list", "table"):
         ans_type = "list"
@@ -571,8 +577,8 @@ def are_strings_in_consensus(a1: Any, a2: Any) -> bool:
     """
     if a1 is None or a2 is None:
         return False
-    s1 = unicodedata.normalize("NFC", str(a1)).strip().lower()
-    s2 = unicodedata.normalize("NFC", str(a2)).strip().lower()
+    s1 = unicodedata.normalize("NFC", str(a1)).strip().strip('\'"“”‘’').strip().lower()
+    s2 = unicodedata.normalize("NFC", str(a2)).strip().strip('\'"“”‘’').strip().lower()
     if not s1 or not s2:
         return False
     if s1 == s2:

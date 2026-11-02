@@ -50,14 +50,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--calendar",
         type=Path,
-        default=PROJECT_ROOT / "train" / "calendar.csv",
-        help="Đường dẫn tới file calendar.csv.",
+        default=PROJECT_ROOT / "assets" / "calendar.csv" if (PROJECT_ROOT / "assets" / "calendar.csv").exists() else PROJECT_ROOT / "train" / "calendar.csv",
+        help="Đường dẫn tới file calendar.csv (mặc định ưu tiên assets/calendar.csv).",
     )
     parser.add_argument(
         "--rulebook",
         type=Path,
-        default=PROJECT_ROOT / "train" / "rulebook.md",
-        help="Đường dẫn tới file rulebook.md.",
+        default=PROJECT_ROOT / "assets" / "rulebook.md" if (PROJECT_ROOT / "assets" / "rulebook.md").exists() else PROJECT_ROOT / "train" / "rulebook.md",
+        help="Đường dẫn tới file rulebook.md (mặc định ưu tiên assets/rulebook.md).",
     )
     parser.add_argument(
         "--output",
@@ -119,12 +119,6 @@ def parse_args() -> argparse.Namespace:
         help="In chi tiết từng lần thử sinh code và kết quả Sandbox.",
     )
     parser.add_argument(
-        "--notify-topic",
-        type=str,
-        default="",
-        help="Kênh ntfy.sh để stream log trực tiếp lên Google Colab và tự động ngắt session.",
-    )
-    parser.add_argument(
         "--concurrency",
         type=int,
         default=3,
@@ -147,8 +141,8 @@ def parse_args() -> argparse.Namespace:
         "--arbitration",
         type=str,
         default="strict",
-        choices=["adaptive", "strict"],
-        help="Chính sách trọng tài: 'strict' (bắt buộc cả 2 thành công và đồng thuận, an toàn tối đa) hoặc 'adaptive' (fallback p1 khi p2 lỗi kỹ thuật).",
+        choices=["strict", "adaptive"],
+        help="Chính sách trọng tài: 'strict' (an toàn tối đa, yêu cầu đồng thuận tuyệt đối, Safe Abstain khi bất đồng), hoặc 'adaptive' (cho phép fallback P1 khi P2 lỗi runtime).",
     )
     parser.add_argument(
         "--fresh",
@@ -171,15 +165,13 @@ def main() -> None:
             print(f"ℹ️ [Path Correction] Phát hiện đường dẫn thừa '/data', tự động trỏ về: {args.data_root.parent}")
             args.data_root = args.data_root.parent
 
-    # Tự động ưu tiên thư mục preprocessed nếu có trên Google Drive hoặc thư mục làm việc
+    # Tự động ưu tiên thư mục preprocessed nội bộ nếu có
     is_public_test = "public" in str(args.questions).lower() or "dev" in str(args.data_root).lower()
     if is_public_test:
         if str(args.data_root).rstrip("/\\").endswith("public_test/data") or not args.data_root.exists():
             candidate_public_preprocessed = [
-                Path("/content/drive/MyDrive/public_test_preprocessed"),
-                Path("/content/drive/MyDrive/Datamate/public_test_preprocessed"),
-                Path("/content/drive/MyDrive/zaloAI/public_test_preprocessed"),
                 PROJECT_ROOT / "public_test_preprocessed",
+                Path.cwd() / "public_test_preprocessed",
             ]
             for candidate in candidate_public_preprocessed:
                 if candidate.exists() and candidate.is_dir() and any(candidate.glob("dev_*")):
@@ -188,14 +180,10 @@ def main() -> None:
                     break
     elif str(args.data_root).rstrip("/\\").endswith("train/data") or not args.data_root.exists():
         candidate_preprocessed = [
-            Path("/content/drive/MyDrive/train_preprocessed_full"),
-            Path("/content/drive/MyDrive/train_preprocessed"),
-            Path("/content/drive/MyDrive/Datamate/train_preprocessed_full"),
-            Path("/content/drive/MyDrive/Datamate/train_preprocessed"),
-            Path("/content/drive/MyDrive/zaloAI/train_preprocessed_full"),
-            Path("/content/drive/MyDrive/zaloAI/train_preprocessed"),
             PROJECT_ROOT / "train_preprocessed_full",
             PROJECT_ROOT / "train_preprocessed",
+            Path.cwd() / "train_preprocessed_full",
+            Path.cwd() / "train_preprocessed",
         ]
         for candidate in candidate_preprocessed:
             if candidate.exists() and candidate.is_dir() and any(candidate.glob("biz_*")):
@@ -207,37 +195,32 @@ def main() -> None:
     if not args.questions.exists():
         if (PROJECT_ROOT / args.questions).exists():
             args.questions = PROJECT_ROOT / args.questions
-        else:
-            for p in [
-                Path("/content/drive/MyDrive/zaloAI/data") / args.questions,
-                Path("/content/drive/MyDrive/zaloAI") / args.questions,
-                Path("/content/drive/MyDrive") / args.questions,
-                Path("/content/drive/MyDrive") / args.questions.name,
-            ]:
-                if p.exists():
-                    args.questions = p
-                    break
+        elif (PROJECT_ROOT / args.questions.name).exists():
+            args.questions = PROJECT_ROOT / args.questions.name
 
     # Tương tự tự động định vị file gold
     if args.gold and not args.gold.exists():
         if (PROJECT_ROOT / args.gold).exists():
             args.gold = PROJECT_ROOT / args.gold
-        else:
-            for p in [
-                Path("/content/drive/MyDrive/zaloAI/data") / args.gold,
-                Path("/content/drive/MyDrive/zaloAI") / args.gold,
-                Path("/content/drive/MyDrive") / args.gold,
-                Path("/content/drive/MyDrive") / args.gold.name,
-            ]:
-                if p.exists():
-                    args.gold = p
-                    break
+        elif (PROJECT_ROOT / args.gold.name).exists():
+            args.gold = PROJECT_ROOT / args.gold.name
 
     # Tự động định vị calendar và rulebook
-    if not args.calendar.exists() and (PROJECT_ROOT / args.calendar).exists():
-        args.calendar = PROJECT_ROOT / args.calendar
-    if not args.rulebook.exists() and (PROJECT_ROOT / args.rulebook).exists():
-        args.rulebook = PROJECT_ROOT / args.rulebook
+    if not args.calendar.exists():
+        if (PROJECT_ROOT / args.calendar).exists():
+            args.calendar = PROJECT_ROOT / args.calendar
+        elif (PROJECT_ROOT / "assets" / "calendar.csv").exists():
+            args.calendar = PROJECT_ROOT / "assets" / "calendar.csv"
+        elif (PROJECT_ROOT / "train" / "calendar.csv").exists():
+            args.calendar = PROJECT_ROOT / "train" / "calendar.csv"
+
+    if not args.rulebook.exists():
+        if (PROJECT_ROOT / args.rulebook).exists():
+            args.rulebook = PROJECT_ROOT / args.rulebook
+        elif (PROJECT_ROOT / "assets" / "rulebook.md").exists():
+            args.rulebook = PROJECT_ROOT / "assets" / "rulebook.md"
+        elif (PROJECT_ROOT / "train" / "rulebook.md").exists():
+            args.rulebook = PROJECT_ROOT / "train" / "rulebook.md"
 
     questions = load_jsonl(args.questions)
     if args.limit and args.limit > 0:
@@ -339,30 +322,6 @@ def main() -> None:
     print(f"Bắt đầu chạy DataMate Pipeline trên {len(questions)} câu hỏi (Cần chạy mới: {len(to_run)} | Concurrency: {args.concurrency})...")
     print(f"Model: {llm_client.model_name} | Backend: {llm_client.backend} | Max Retries: {args.max_retries}")
 
-    def notify_colab(msg: str) -> None:
-        if args.notify_topic:
-            try:
-                import requests
-                requests.post(
-                    f"https://ntfy.sh/{args.notify_topic}",
-                    data=msg.encode("utf-8"),
-                    timeout=2.0,
-                )
-            except Exception:
-                pass
-        if args.api_base and "http" in args.api_base:
-            try:
-                import requests
-                base_root = args.api_base.split("/v1")[0].rstrip("/")
-                if "PIPELINE_COMPLETE_SHUTDOWN" in msg:
-                    requests.post(f"{base_root}/shutdown", json={"msg": msg}, timeout=3.0)
-                else:
-                    requests.post(f"{base_root}/progress", json={"msg": msg}, timeout=1.0)
-            except Exception:
-                pass
-
-    notify_colab(f"🚀 BẮT ĐẦU CHẠY PIPELINE (Đã bảo lưu {len(existing_cache)} câu tốt, tối ưu prompt L4, concurrency={args.concurrency})...")
-
     lock = threading.Lock()
     start_time = time.time()
 
@@ -419,7 +378,6 @@ def main() -> None:
                         )
                         if done_new == 1 or done_new % 3 == 0 or completed_count == len(questions):
                             print(f"  {log_line}")
-                            notify_colab(log_line)
         else:
             for idx, q_obj in to_run:
                 pred, details = agent.answer_question_dual(q_obj)
@@ -446,13 +404,10 @@ def main() -> None:
                 )
                 if done_new == 1 or done_new % 3 == 0 or completed_count == len(questions):
                     print(f"  {log_line}")
-                    notify_colab(log_line)
 
     # Đổi tên file tạm thành file chính thức an toàn
     shutil.move(str(tmp_output), str(args.output))
     shutil.move(str(tmp_details), str(details_path))
-
-    notify_colab("PIPELINE_COMPLETE_SHUTDOWN: Đã hoàn tất 100% toàn bộ câu hỏi! Đang tự động ngắt phiên Colab để tiết kiệm CU...")
 
     predictions = [r for r in results if r is not None]
     print(f"✅ Đã xuất kết quả dự đoán chính thức tại: {args.output}")
@@ -473,18 +428,6 @@ def main() -> None:
         print(f"Điểm ròng (Correct-Wrong): {report['raw_points']}")
         print(f"Penalized Accuracy (PA)  : {report['penalized_accuracy'] * 100:.2f}%")
         print("=" * 60)
-
-    if args.api_base and "http" in args.api_base:
-        try:
-            import requests
-            base_root = args.api_base.split("/v1")[0].rstrip("/")
-            if args.evaluate and "report" in locals():
-                score_str = f"PA: {report['penalized_accuracy']*100:.2f}% | Đúng: {report['correct']} | Sai: {report['wrong']} | Bỏ qua: {report['abstain']}"
-            else:
-                score_str = f"Đã hoàn tất 100% ({len(questions)} câu)!"
-            requests.post(f"{base_root}/shutdown", json={"msg": score_str}, timeout=5.0)
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":

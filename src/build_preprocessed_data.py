@@ -231,9 +231,9 @@ def process_single_shop(
         if not is_conv_table and not base_qty_cols and qty_cols and (conv_df is not None or readme_conversions):
             q_col = qty_cols[0]
             qty_base_series = pd.to_numeric(out_df[q_col], errors="coerce").fillna(1.0).copy()
+            factors = pd.Series(1.0, index=out_df.index)
             
-            # Cách 1: Áp dụng bảng quy đổi của shop
-            converted = False
+            # Cách 1: Áp dụng bảng quy đổi của shop (nếu có)
             if conv_df is not None and prod_cols and unit_cols:
                 p_col = prod_cols[0]
                 u_col = unit_cols[0]
@@ -255,18 +255,18 @@ def process_single_shop(
                             how="left",
                         )
                         factors = pd.to_numeric(merged[c_f], errors="coerce").fillna(1.0)
-                        qty_base_series = qty_base_series * factors
-                        converted = True
 
-            # Cách 2: Áp dụng readme_conversions nếu chưa quy đổi bằng bảng
-            if not converted and readme_conversions and prod_cols and unit_cols:
+            # Cách 2: Bổ sung từ readme_conversions cho các dòng chưa được quy đổi trong bảng (factors == 1.0)
+            if readme_conversions and prod_cols and unit_cols:
                 p_col = prod_cols[0]
                 u_col = unit_cols[0]
                 for idx, (p_val, u_val) in enumerate(zip(out_df[p_col], out_df[u_col])):
-                    key = (to_nfc(str(p_val)).strip().lower(), to_nfc(str(u_val)).strip().lower())
-                    if key in readme_conversions:
-                        qty_base_series.iloc[idx] = qty_base_series.iloc[idx] * readme_conversions[key]
+                    if factors.iloc[idx] == 1.0:
+                        key = (to_nfc(str(p_val)).strip().lower(), to_nfc(str(u_val)).strip().lower())
+                        if key in readme_conversions:
+                            factors.iloc[idx] = float(readme_conversions[key])
 
+            qty_base_series = qty_base_series * factors
             out_df["qty_base"] = qty_base_series
             out_df["Quy ra ĐV lẻ"] = qty_base_series
 

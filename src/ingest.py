@@ -649,12 +649,21 @@ def apply_rulebook_section8_cleaning(df: pd.DataFrame) -> pd.DataFrame:
             # Loại bỏ hai dòng của cùng một đơn giống nhau ở mọi ô (chỉ áp dụng cho các dòng thuộc về một đơn hàng)
             data_cols = [c for c in df.columns if not c.startswith("_")]
             order_rows = df[df[order_col].notna() & ~is_subtotal].drop_duplicates(subset=data_cols, keep="first")
-            no_order_rows = df[df[order_col].isna()]
+            no_order_rows = df[df[order_col].isna() & ~is_subtotal]
             df = pd.concat([order_rows, no_order_rows]).sort_index().reset_index(drop=True)
         elif is_subtotal.any():
             df = df[~is_subtotal].reset_index(drop=True)
     else:
-        # Nếu bảng không có cột mã đơn, vẫn lọc các dòng subtotal rác ở cuối bảng
+        # Nếu bảng không có cột mã đơn, vẫn lọc triệt để các dòng subtotal/footer rác ở cuối bảng
+        subtotal_pat = re.compile(
+            r"^\s*(?:cộng\s+ngày|tổng\s+tháng|tổng\s+cộng|grand\s+total|subtotal|cộng\b|tổng\b|tổng\s+phát\s+sinh|cộng\s+chuyển\s+sang|thành\s+tiền\s+cả\s+đợt|kế\s+toán\b|người\s+lập\b|bằng\s+chữ\b)",
+            re.IGNORECASE,
+        )
+        is_subtotal = pd.Series(False, index=df.index)
+        text_cols = [c for c in df.columns if df[c].dtype == object and not c.startswith("_")]
+        for tc in text_cols:
+            is_subtotal = is_subtotal | df[tc].astype(str).str.contains(subtotal_pat, na=False)
+
         dim_keywords = ("ngày", "ngay", "thời gian", "tên hàng", "sản phẩm", "hàng hóa", "khách hàng", "khách", "mặt hàng")
         present_dims = [c for c in df.columns if any(k in c.lower() for k in dim_keywords) and not c.startswith("_")]
         if present_dims:
@@ -662,9 +671,10 @@ def apply_rulebook_section8_cleaning(df: pd.DataFrame) -> pd.DataFrame:
             num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and not c.startswith("_")]
             if num_cols:
                 has_num = df[num_cols].notna().any(axis=1)
-                is_pure_subtotal = all_dims_na & has_num
-                if is_pure_subtotal.any():
-                    df = df[~is_pure_subtotal].reset_index(drop=True)
+                is_subtotal = is_subtotal | (all_dims_na & has_num)
+
+        if is_subtotal.any():
+            df = df[~is_subtotal].reset_index(drop=True)
 
     return df
 
@@ -853,7 +863,19 @@ class BusinessDataStore:
             if found_status:
                 for target in ["Trạng thái", "status_norm", "Tình trạng"]:
                     if target not in df.columns:
-                        df[target] = df[found_status]
+                        if target == "status_norm":
+                            def _map_st(v):
+                                s_low = str(v).lower()
+                                if any(k in s_low for k in ["hủy", "huỷ", "cancel"]):
+                                    return "Đã hủy"
+                                if any(k in s_low for k in ["trả", "tra", "return"]):
+                                    return "Trả hàng"
+                                if any(k in s_low for k in ["đang giao", "chờ", "pending"]):
+                                    return "Đang giao"
+                                return "Hoàn thành"
+                            df[target] = df[found_status].map(_map_st)
+                        else:
+                            df[target] = df[found_status]
                         synthetic.add(target)
 
             # 8. Doanh thu / Thành tiền / Tổng tiền / Trị giá
@@ -868,6 +890,18 @@ class BusinessDataStore:
                 for target in ["Thành tiền", "revenue_norm", "Tổng tiền"]:
                     if target not in df.columns:
                         df[target] = df[found_rev]
+                        synthetic.add(target)
+
+            # 8b. Số lượng / Sản lượng / qty_base
+            qty_syns = [
+                "Số lượng", "qty_base", "SL", "Sluong", "Số Lượng", "Số lượng bán",
+                "SL bán", "SLBan", "SoLuong", "Soluong", "Số lượng xuất", "SL xuất", "Số lượng lẻ", "SL lẻ"
+            ]
+            found_qty = next((c for c in qty_syns if c in df.columns), None)
+            if found_qty:
+                for target in ["Số lượng", "qty_base"]:
+                    if target not in df.columns:
+                        df[target] = df[found_qty]
                         synthetic.add(target)
 
             # 9. Nhóm hàng / Danh mục / Loại sản phẩm

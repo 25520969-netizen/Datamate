@@ -25,6 +25,7 @@ from src.ingest import BusinessDataStore
 from src.postprocess import check_consensus, postprocess_and_guard
 from src.rule_engine import DAILFewShotSelector, DynamicEntityGrounder, RuleEngine
 from src.sandbox import PythonSandbox
+from src.vietnamese_normalizer import VietnameseNormalizer
 
 
 DEFAULT_QWEN_14B_AWQ_MODEL = "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ"
@@ -44,11 +45,11 @@ QUY TẮC CỐT LÕI (DUCKDB SQL):
    - Tuyệt đối KHÔNG viết comment (# ...) trong code Python, chỉ viết trực tiếp các lệnh thực thi.
    - Luôn bọc `COALESCE(SUM(...), 0)` ở các hàm tổng hợp để tránh trả về NULL. Khi lấy kết quả: `row = con.execute(query).fetchone(); val = row[0] if row else 0; result = {"type": "number", "answer": float(val) if val is not None else 0.0}`.
    - Tất cả tên bảng và tên cột tiếng Việt có dấu, khoảng trắng BẮT BUỘC bọc trong ngoặc kép: `"Thành tiền"`, `"Mã đơn hàng"`, `"Ngày"`, `"Trạng thái"`.
-   - Lọc ngày: `WHERE CAST("Ngày" AS DATE) BETWEEN DATE 'start' AND DATE 'end'` (hoặc `CAST("Ngày" AS VARCHAR)`).
-   - Lọc đơn hợp lệ (bỏ đơn hủy, đơn trả): `WHERE "status_norm" = 'Hoàn thành'` (hoặc `"Trạng thái" NOT ILIKE '%hủy%' AND "Trạng thái" NOT ILIKE '%trả%'`).
-   - Doanh thu (revenue): Luôn là `SUM(COALESCE("revenue_norm", "Thành tiền"))` (tuyệt đối không nhân số lượng với ANY_VALUE của đơn giá!).
-   - Xếp hạng ngày hoặc khách có doanh thu cao nhất: `ORDER BY SUM(COALESCE("revenue_norm", "Thành tiền")) DESC LIMIT N`.
-   - Xếp hạng SẢN PHẨM bán chạy nhất: `ORDER BY SUM(COALESCE("qty_base", "Số lượng")) DESC LIMIT N` (xếp theo sản lượng bán ra).
+   - Lọc ngày: `WHERE CAST("Ngày" AS DATE) BETWEEN DATE 'start' AND DATE 'end'` (hoặc dùng đúng tên cột ngày có trong schema như "Thời gian", "Ngày bán").
+   - Lọc đơn hợp lệ (bỏ đơn hủy, trả): Chỉ áp dụng khi bảng có cột trạng thái: `WHERE "status_norm" = 'Hoàn thành'` (hoặc `"Trạng thái" NOT ILIKE '%hủy%' AND "Trạng thái" NOT ILIKE '%trả%'`). Nếu bảng KHÔNG CÓ cột trạng thái trong schema, KHÔNG ĐƯỢC thêm mệnh đề WHERE lọc trạng thái!
+   - Doanh thu (revenue): Dùng đúng cột tiền có trong bảng (ví dụ `"Thành tiền"`, `"revenue_norm"`, hoặc `"Tổng tiền"`). Tuyệt đối không nhân số lượng với ANY_VALUE của đơn giá!
+   - Xếp hạng ngày hoặc khách có doanh thu cao nhất: `ORDER BY SUM(COALESCE("revenue_norm", "Thành tiền", 0)) DESC LIMIT N` (hoặc cột doanh thu tương ứng có trong bảng).
+   - Xếp hạng SẢN PHẨM bán chạy nhất: `ORDER BY SUM(COALESCE("qty_base", "Số lượng", 0)) DESC LIMIT N` (hoặc cột số lượng tương ứng có trong bảng, xếp theo sản lượng bán ra).
    - Đếm đơn hàng: `SELECT COUNT(DISTINCT "Mã đơn hàng")` trên bảng chi tiết; không dùng `COUNT(*)` kẻo đếm nhầm dòng sản phẩm.
    - Xếp hạng khách hàng: BẮT BUỘC loại bỏ khách lẻ và khách vãng lai: `WHERE "Khách hàng" NOT ILIKE '%khách lẻ%' AND "Khách hàng" NOT ILIKE '%lẻ%' AND "Khách hàng" NOT ILIKE '%vãng lai%' AND "Khách hàng" IS NOT NULL`.
    - Khi JOIN nhiều bảng (vd DonHang và ChiTietDon), luôn chỉ định rõ alias trước tên cột (vd: o."Khách hàng", c."Khách hàng") để tránh lỗi DuckDB "Ambiguous reference to column name".
@@ -77,7 +78,7 @@ Nhiệm vụ: Viết một đoạn mã Python truy vấn dữ liệu từ kết 
 QUY TẮC CỐT LÕI (DEFENSIVE VERIFICATION DUCKDB ENGINE):
 1. Tổ chức truy vấn kiểm soát dữ liệu chặt chẽ:
    - Ưu tiên viết truy vấn trực tiếp, đơn giản và sạch sẽ. Có thể dùng CTE (WITH ... AS ...) nếu bài toán có nhiều bước tính phức tạp.
-   - Mặc định giao dịch hợp lệ (doanh thu, số lượng đơn, bán chạy): Bỏ đơn hủy và đơn trả hàng, dùng WHERE "status_norm" = 'Hoàn thành' (hoặc "Trạng thái" NOT ILIKE '%hủy%' AND "Trạng thái" NOT ILIKE '%trả%').
+   - Mặc định giao dịch hợp lệ (doanh thu, số lượng đơn, bán chạy): Bỏ đơn hủy và đơn trả hàng khi bảng có cột trạng thái: `WHERE "status_norm" = 'Hoàn thành'` (hoặc `"Trạng thái" NOT ILIKE '%hủy%' AND "Trạng thái" NOT ILIKE '%trả%'`). Nếu bảng KHÔNG CÓ cột trạng thái, không thêm điều kiện lọc trạng thái.
    - TUYỆT ĐỐI KHÔNG tự ý JOIN bảng chi tiết với bảng hóa đơn khi câu hỏi chỉ cần dữ liệu từ 1 bảng duy nhất (như bảng bán hàng hoặc bảng hóa đơn), vì JOIN thừa sẽ nhân bản dòng dữ liệu (Cartesian product) làm sai lệch nghiêm trọng kết quả tính toán!
    - Tỉ lệ đơn hủy: KHÔNG được lọc bỏ đơn hủy trước khi tính (tuyệt đối không dùng `WHERE "Trạng thái" NOT IN ('Đã hủy')` làm mất đơn hủy). Công thức chuẩn: `COUNT(DISTINCT CASE WHEN "status_norm" = 'Đã hủy' THEN "Mã đơn hàng" END) * 100.0 / NULLIF(COUNT(DISTINCT "Mã đơn hàng"), 0)`.
 2. Quy tắc an toàn bắt buộc:
@@ -336,6 +337,7 @@ class DataMateAgent:
         self.rule_engine = RuleEngine(rulebook_path=rulebook_path)
         self.entity_grounder = DynamicEntityGrounder()
         self.few_shot_selector = DAILFewShotSelector()
+        self.vietnamese_normalizer = VietnameseNormalizer(llm_client=llm_client)
         self.sandbox = PythonSandbox(
             data_root=data_root,
             cache_root=cache_root,
@@ -477,13 +479,26 @@ class DataMateAgent:
         """
         qid = question_obj["id"]
         business_id = question_obj["business_id"]
-        question = self.rule_engine.normalize_telex_typos(question_obj["question"])
-        question_obj["question"] = question
         as_of_date = question_obj["as_of_date"]
+        raw_question = question_obj.get("question", "")
 
         try:
             biz_readme = self.store.get_readme(business_id)
             tables = self.store.load_tables(business_id)
+            schema_prompt = self.store.build_compact_schema_prompt(business_id, question=raw_question)
+
+            # Tầng 1: Vietnamese Context-Aware Canonicalizer (DART-SQL + ViLexNorm)
+            # Chuẩn hoá tiếng địa phương, từ viết tắt, teen code dựa trên schema và cell values của shop hiện tại
+            question = self.vietnamese_normalizer.canonicalize(
+                question=raw_question,
+                schema_summary=schema_prompt,
+                as_of_date=as_of_date,
+                tables=tables,
+            )
+            if not question:
+                question = self.rule_engine.normalize_telex_typos(raw_question)
+            question_obj["question"] = question
+
             entity_hints = self.entity_grounder.find_grounding_hints(question, business_id, tables)
             few_shot_prompt = self.few_shot_selector.select_exemplars(
                 question=question,
@@ -493,7 +508,6 @@ class DataMateAgent:
             date_ctx = self.date_resolver.resolve(question, as_of_date)
             date_prompt = self.date_resolver.format_for_prompt(question, as_of_date)
             rules_prompt = self.rule_engine.select_relevant_rules(question, biz_readme)
-            schema_prompt = self.store.build_compact_schema_prompt(business_id, question=question)
 
             is_unans, unans_reason = self.rule_engine.detect_unanswerable_deterministic(
                 question_obj=question_obj,
@@ -638,24 +652,22 @@ class DataMateAgent:
         p2_code_str = str(code2 or "")
         q_low = question.lower()
 
-        # Tiền kiểm tra: Trọng tài Khách lẻ vs Tên người thật (Identified Customer Arbitration)
-        # Nếu câu hỏi hỏi khách chi tiêu/mua nhiều nhất, một bên ra tên người cụ thể (>= 2 từ tiếng Việt)
-        # trong khi bên kia ra 'Khách lẻ' / 'khách vãng lai' (kể cả khi đã bị Sanity Guard chặn thành abstain)
-        is_top_cust_q = any(k in q_low for k in ["mua nhìu tiền", "mua nhiều tiền", "chi nhiều tiền", "chi tieu nhieu", "khách nào", "ai mua", "khach nao", "ai chi"])
+        # Tiền kiểm tra: Trọng tài Thực thể định danh vs Khách lẻ (Rulebook Section 3)
+        # Đơn không ghi mã / khách lẻ không phải khách, không đếm và không xếp hạng.
         raw1_ans = str(raw1.get("answer", "") if isinstance(raw1, dict) else "").strip().lower()
         raw2_ans = str(raw2.get("answer", "") if isinstance(raw2, dict) else "").strip().lower()
-        p1_is_kl = "khách lẻ" in raw1_ans or "khach le" in raw1_ans or raw1_ans == "lẻ"
-        p2_is_kl = "khách lẻ" in raw2_ans or "khach le" in raw2_ans or raw2_ans == "lẻ"
+        generic_markers = ("khách lẻ", "khach le", "lẻ", "le", "khách vãng lai", "khach vang lai", "vãng lai", "null", "none")
+        p1_is_generic = any(m in raw1_ans for m in generic_markers) or raw1_ans in generic_markers
+        p2_is_generic = any(m in raw2_ans for m in generic_markers) or raw2_ans in generic_markers
 
-        if is_top_cust_q and (p1_is_kl or p2_is_kl):
-            if p2_is_kl and p1_valid and pred1.get("type") == "string":
-                is_consensus = False
-                final_pred = pred1
-                decision_reason = "retail_customer_arbitration_p1"
-            elif p1_is_kl and p2_valid and pred2.get("type") == "string":
-                is_consensus = False
-                final_pred = pred2
-                decision_reason = "retail_customer_arbitration_p2"
+        if p2_is_generic and p1_valid and pred1.get("type") == "string" and not p1_is_generic:
+            is_consensus = False
+            final_pred = pred1
+            decision_reason = "retail_customer_arbitration_p1"
+        elif p1_is_generic and p2_valid and pred2.get("type") == "string" and not p2_is_generic:
+            is_consensus = False
+            final_pred = pred2
+            decision_reason = "retail_customer_arbitration_p2"
 
         if final_pred.get("type") != "abstain":
             pass
@@ -741,10 +753,12 @@ class DataMateAgent:
                         final_pred = pred2
                         decision_reason = "p2_table_non_empty_arbitration"
                     else:
+                        # Hai bảng có nội dung khác nhau -> Chủ động từ bỏ để tránh bị phạt -1 điểm
                         is_consensus = False
                         final_pred = {"id": qid, "type": "abstain"}
                         decision_reason = "table_disagreement_abstain"
                 else:
+                    # Hai đáp án bất đồng (không qua được check_consensus) -> Safe Abstain (0 điểm)
                     is_consensus = False
                     final_pred = {"id": qid, "type": "abstain"}
                     decision_reason = "consensus_disagreement_abstain"
@@ -766,7 +780,7 @@ class DataMateAgent:
                 else:
                     final_pred = {"id": qid, "type": "abstain"}
                     decision_reason = "strict_requires_both"
-            elif self.arbitration_strategy == "adaptive":
+            elif self.arbitration_strategy in ("tournament", "adaptive"):
                 # Prompt 1 (SQL) vượt qua toàn bộ guard an toàn, Prompt 2 lỗi kỹ thuật -> Giữ Prompt 1
                 is_consensus = False
                 final_pred = pred1

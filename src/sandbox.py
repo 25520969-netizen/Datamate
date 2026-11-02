@@ -13,7 +13,6 @@ Nếu có lỗi cú pháp hoặc Runtime Exception, trích xuất Traceback ng�
 
 import ast
 import concurrent.futures
-import ctypes
 import json
 import math
 import re
@@ -30,6 +29,60 @@ from typing import Any, Dict, List, Optional, Tuple
 import duckdb
 import numpy as np
 import pandas as pd
+
+
+SAFE_BUILTIN_NAMES = {
+    "abs", "all", "any", "ascii", "bin", "bool", "bytearray", "bytes", "callable", "chr",
+    "complex", "dict", "divmod", "enumerate", "filter", "float", "format", "frozenset",
+    "getattr", "hasattr", "hash", "hex", "int", "isinstance", "issubclass", "iter", "len",
+    "list", "map", "max", "min", "next", "oct", "ord", "pow", "print", "range", "repr",
+    "reversed", "round", "set", "slice", "sorted", "str", "sum", "tuple", "type", "zip",
+    "True", "False", "None", "NotImplemented", "Ellipsis",
+    "ArithmeticError", "AssertionError", "AttributeError", "BaseException", "Exception",
+    "FloatingPointError", "IndexError", "KeyError", "LookupError", "NameError",
+    "OverflowError", "RuntimeError", "StopIteration", "SyntaxError", "TypeError",
+    "ValueError", "ZeroDivisionError", "SystemExit",
+}
+
+
+def make_safe_import(duckdb_proxy: Any, pd_mod: Any, np_mod: Any) -> Any:
+    """Tạo hàm import an toàn chỉ cho phép các thư viện cần thiết, chặn đứng việc gọi hệ thống ngoài."""
+    allowed = {
+        "math": math,
+        "re": re,
+        "json": json,
+        "datetime": datetime,
+        "date": date,
+        "timedelta": timedelta,
+        "unicodedata": unicodedata,
+        "duckdb": duckdb_proxy,
+        "pandas": pd_mod,
+        "pd": pd_mod,
+        "numpy": np_mod,
+        "np": np_mod,
+    }
+
+    def _safe_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        root = name.split(".")[0].lower()
+        if root not in allowed:
+            raise ImportError(f"Importing module '{name}' is forbidden for security in DataMate Sandbox.")
+        if root == "datetime":
+            import datetime as _dt
+            return _dt
+        return allowed[root]
+
+    return _safe_import
+
+
+def make_safe_builtins(custom_import_fn: Any) -> Dict[str, Any]:
+    """Tạo whitelist __builtins__ loại bỏ hoàn toàn các hàm nguy hiểm (open, eval, exec, compile...)."""
+    import builtins
+    b_dict: Dict[str, Any] = {}
+    for name in SAFE_BUILTIN_NAMES:
+        if hasattr(builtins, name):
+            b_dict[name] = getattr(builtins, name)
+    b_dict["__import__"] = custom_import_fn
+    return b_dict
 
 
 def has_while_loop(code: str) -> bool:
@@ -100,23 +153,55 @@ def _build_col_fuzzy_rules(tables: Dict[str, pd.DataFrame]) -> List[Tuple[Any, s
 
 
 class SafeDuckDBWrapper:
-    """Bọc kết nối DuckDB để tự động chuyển MySQL backticks thành double-quotes và so khớp mờ tên cột."""
+    """Bọc kết nối DuckDB để tự động chuyển MySQL backticks thành double-quotes, so khớp mờ tên cột và phòng thủ cột giả định."""
 
-    def __init__(self, inner_con: Any, col_fuzzy_rules: Optional[List[Tuple[Any, str]]] = None) -> None:
+    def __init__(
+        self,
+        inner_con: Any,
+        col_fuzzy_rules: Optional[List[Tuple[Any, str]]] = None,
+        tables: Optional[Dict[str, pd.DataFrame]] = None,
+    ) -> None:
         self._inner = inner_con
         self._rules = col_fuzzy_rules or []
+        self._tables = tables or {}
 
     def _fix_sql(self, sql: str) -> str:
         fixed = re.sub(r"`([^`]+)`", r'"\1"', str(sql))
-        if not self._rules:
-            return fixed
-        parts = re.split(r"('[^']*'|\"[^\"]*\")", fixed)
-        for idx in range(0, len(parts), 2):
-            chunk = parts[idx]
-            for pat_re, repl in self._rules:
-                chunk = pat_re.sub(repl, chunk)
-            parts[idx] = chunk
-        return "".join(parts)
+        if self._rules:
+            parts = re.split(r"('[^']*'|\"[^\"]*\")", fixed)
+            for idx in range(0, len(parts), 2):
+                chunk = parts[idx]
+                for pat_re, repl in self._rules:
+                    chunk = pat_re.sub(repl, chunk)
+                parts[idx] = chunk
+            fixed = "".join(parts)
+
+        # Phòng thủ cột giả định (Binder Error Prevention):
+        if self._tables:
+            all_cols = {str(c).lower() for df in self._tables.values() if hasattr(df, "columns") for c in df.columns}
+            # 1. status_norm
+            if "status_norm" not in all_cols:
+                fixed = re.sub(r'CASE\s+WHEN\s+("status_norm"|\bstatus_norm\b)\s*=\s*[\'"][^\'"]*[\'"]\s+THEN\s+([^E]+?)\s+END', r'NULL', fixed, flags=re.I)
+                fixed = re.sub(r'("status_norm"|\bstatus_norm\b)\s*=\s*[\'"][^\'"]*[\'"]', '1=1', fixed, flags=re.I)
+                fixed = re.sub(r'("status_norm"|\bstatus_norm\b)\s*!=\s*[\'"][^\'"]*[\'"]', '1=1', fixed, flags=re.I)
+                fixed = re.sub(r'("status_norm"|\bstatus_norm\b)\s+NOT\s+IN\s*\([^)]*\)', '1=1', fixed, flags=re.I)
+                fixed = re.sub(r'("status_norm"|\bstatus_norm\b)\s+IN\s*\([^)]*\)', '1=1', fixed, flags=re.I)
+            # 2. revenue_norm
+            if "revenue_norm" not in all_cols:
+                repl_rev = '"Thành tiền"' if "thành tiền" in all_cols else ('"Tổng tiền"' if "tổng tiền" in all_cols else '"revenue_norm"')
+                if repl_rev != '"revenue_norm"':
+                    fixed = re.sub(r'COALESCE\s*\(\s*("revenue_norm"|\brevenue_norm\b)\s*,\s*("[^"]+"|[a-zA-Z0-9_\u00C0-\u024F\u1EA0-\u1EF9]+)\s*\)', repl_rev, fixed, flags=re.I)
+                    fixed = re.sub(r'COALESCE\s*\(\s*("[^"]+"|[a-zA-Z0-9_\u00C0-\u024F\u1EA0-\u1EF9]+)\s*,\s*("revenue_norm"|\brevenue_norm\b)\s*\)', r'\1', fixed, flags=re.I)
+                    fixed = re.sub(r'("revenue_norm"|\brevenue_norm\b)', repl_rev, fixed, flags=re.I)
+            # 3. qty_base
+            if "qty_base" not in all_cols:
+                repl_qty = '"Số lượng"' if "số lượng" in all_cols else ('"SL"' if "sl" in all_cols else '"qty_base"')
+                if repl_qty != '"qty_base"':
+                    fixed = re.sub(r'COALESCE\s*\(\s*("qty_base"|\bqty_base\b)\s*,\s*("[^"]+"|[a-zA-Z0-9_\u00C0-\u024F\u1EA0-\u1EF9]+)\s*\)', repl_qty, fixed, flags=re.I)
+                    fixed = re.sub(r'COALESCE\s*\(\s*("[^"]+"|[a-zA-Z0-9_\u00C0-\u024F\u1EA0-\u1EF9]+)\s*,\s*("qty_base"|\bqty_base\b)\s*\)', r'\1', fixed, flags=re.I)
+                    fixed = re.sub(r'("qty_base"|\bqty_base\b)', repl_qty, fixed, flags=re.I)
+
+        return fixed
 
     def execute(self, sql: str, *args, **kwargs):
         return self._inner.execute(self._fix_sql(sql), *args, **kwargs)
@@ -254,11 +339,11 @@ def main():
         col_fuzzy_rules.append((pat_regex, f'"{col}"'))
 
     class _SafeDuckDBWrapper:
-        def __init__(self, inner_con):
+        def __init__(self, inner_con, tables=None):
             self._inner = inner_con
+            self._tables = tables or {}
 
-        @staticmethod
-        def _fix_sql(sql: str) -> str:
+        def _fix_sql(self, sql: str) -> str:
             # 1. Tự động chuyển dấu backtick kiểu MySQL `Tên cột` sang dấu ngoặc kép chuẩn DuckDB "Tên cột"
             fixed = re.sub(r"`([^`]+)`", r'"\1"', str(sql))
             # 2. Tự động bọc ngoặc kép quanh các tên cột có dấu cách / biến thể bỏ dấu nằm ngoài chuỗi '...' hoặc "..."
@@ -268,7 +353,29 @@ def main():
                 for pat_re, repl in col_fuzzy_rules:
                     chunk = pat_re.sub(repl, chunk)
                 parts[idx] = chunk
-            return "".join(parts)
+            fixed = "".join(parts)
+
+            if self._tables:
+                all_cols = {str(c).lower() for df in self._tables.values() if hasattr(df, "columns") for c in df.columns}
+                if "status_norm" not in all_cols:
+                    fixed = re.sub(r'CASE\s+WHEN\s+("status_norm"|\bstatus_norm\b)\s*=\s*[\'"][^\'"]*[\'"]\s+THEN\s+([^E]+?)\s+END', r'NULL', fixed, flags=re.I)
+                    fixed = re.sub(r'("status_norm"|\bstatus_norm\b)\s*=\s*[\'"][^\'"]*[\'"]', '1=1', fixed, flags=re.I)
+                    fixed = re.sub(r'("status_norm"|\bstatus_norm\b)\s*!=\s*[\'"][^\'"]*[\'"]', '1=1', fixed, flags=re.I)
+                    fixed = re.sub(r'("status_norm"|\bstatus_norm\b)\s+NOT\s+IN\s*\([^)]*\)', '1=1', fixed, flags=re.I)
+                    fixed = re.sub(r'("status_norm"|\bstatus_norm\b)\s+IN\s*\([^)]*\)', '1=1', fixed, flags=re.I)
+                if "revenue_norm" not in all_cols:
+                    repl_rev = '"Thành tiền"' if "thành tiền" in all_cols else ('"Tổng tiền"' if "tổng tiền" in all_cols else '"revenue_norm"')
+                    if repl_rev != '"revenue_norm"':
+                        fixed = re.sub(r'COALESCE\s*\(\s*("revenue_norm"|\brevenue_norm\b)\s*,\s*("[^"]+"|[a-zA-Z0-9_\u00C0-\u024F\u1EA0-\u1EF9]+)\s*\)', repl_rev, fixed, flags=re.I)
+                        fixed = re.sub(r'COALESCE\s*\(\s*("[^"]+"|[a-zA-Z0-9_\u00C0-\u024F\u1EA0-\u1EF9]+)\s*,\s*("revenue_norm"|\brevenue_norm\b)\s*\)', r'\1', fixed, flags=re.I)
+                        fixed = re.sub(r'("revenue_norm"|\brevenue_norm\b)', repl_rev, fixed, flags=re.I)
+                if "qty_base" not in all_cols:
+                    repl_qty = '"Số lượng"' if "số lượng" in all_cols else ('"SL"' if "sl" in all_cols else '"qty_base"')
+                    if repl_qty != '"qty_base"':
+                        fixed = re.sub(r'COALESCE\s*\(\s*("qty_base"|\bqty_base\b)\s*,\s*("[^"]+"|[a-zA-Z0-9_\u00C0-\u024F\u1EA0-\u1EF9]+)\s*\)', repl_qty, fixed, flags=re.I)
+                        fixed = re.sub(r'COALESCE\s*\(\s*("[^"]+"|[a-zA-Z0-9_\u00C0-\u024F\u1EA0-\u1EF9]+)\s*,\s*("qty_base"|\bqty_base\b)\s*\)', r'\1', fixed, flags=re.I)
+                        fixed = re.sub(r'("qty_base"|\bqty_base\b)', repl_qty, fixed, flags=re.I)
+            return fixed
 
         def execute(self, sql: str, *args, **kwargs):
             return self._inner.execute(self._fix_sql(sql), *args, **kwargs)
@@ -285,15 +392,50 @@ def main():
         def __getattr__(self, name: str):
             return getattr(self._inner, name)
 
-    con = _SafeDuckDBWrapper(raw_con)
+    con = _SafeDuckDBWrapper(raw_con, tables=tables)
     # Monkey-patch duckdb.connect/sql/execute/query để nếu LLM tự gọi duckdb.connect() thì vẫn dùng kết nối an toàn đã có đủ bảng
     duckdb.connect = lambda *a, **kw: con
     duckdb.sql = con.sql
     duckdb.execute = con.execute
     duckdb.query = con.query
 
+    SAFE_BUILTIN_NAMES = {
+        "abs", "all", "any", "ascii", "bin", "bool", "bytearray", "bytes", "callable", "chr",
+        "complex", "dict", "divmod", "enumerate", "filter", "float", "format", "frozenset",
+        "getattr", "hasattr", "hash", "hex", "int", "isinstance", "issubclass", "iter", "len",
+        "list", "map", "max", "min", "next", "oct", "ord", "pow", "print", "range", "repr",
+        "reversed", "round", "set", "slice", "sorted", "str", "sum", "tuple", "type", "zip",
+        "True", "False", "None", "NotImplemented", "Ellipsis",
+        "ArithmeticError", "AssertionError", "AttributeError", "BaseException", "Exception",
+        "FloatingPointError", "IndexError", "KeyError", "LookupError", "NameError",
+        "OverflowError", "RuntimeError", "StopIteration", "SyntaxError", "TypeError",
+        "ValueError", "ZeroDivisionError", "SystemExit",
+    }
+
+    allowed_import = {
+        "math": math, "re": re, "json": json, "datetime": datetime, "date": date,
+        "timedelta": timedelta, "unicodedata": unicodedata, "duckdb": duckdb,
+        "pandas": pd, "pd": pd, "numpy": np, "np": np,
+    }
+
+    def _safe_runner_import(name, *args, **kwargs):
+        root = name.split(".")[0].lower()
+        if root not in allowed_import:
+            raise ImportError(f"Importing module '{name}' is forbidden for security in DataMate Sandbox.")
+        if root == "datetime":
+            import datetime as _dt
+            return _dt
+        return allowed_import[root]
+
+    import builtins as _b_mod
+    runner_builtins = {}
+    for b_name in SAFE_BUILTIN_NAMES:
+        if hasattr(_b_mod, b_name):
+            runner_builtins[b_name] = getattr(_b_mod, b_name)
+    runner_builtins["__import__"] = _safe_runner_import
+
     env = {
-        "__builtins__": __builtins__,
+        "__builtins__": runner_builtins,
         "pd": pd,
         "np": np,
         "duckdb": duckdb,
@@ -467,24 +609,13 @@ class PythonSandbox:
     ) -> Dict[str, Any]:
         raw_con, tables = self._warm_store.create_duckdb_connection(business_id)
         rules = _build_col_fuzzy_rules(tables)
-        safe_con = SafeDuckDBWrapper(raw_con, rules)
+        safe_con = SafeDuckDBWrapper(raw_con, rules, tables=tables)
         duckdb_proxy = _DuckDBModuleProxy(safe_con)
 
         fuzzy_ctx = _FuzzyDateContext(date_context or {})
 
-        # Hook __import__ để nếu LLM sinh `import duckdb` hoặc `from duckdb import ...`
-        # thì luôn trả về duckdb_proxy (trỏ an toàn về safe_con đã nạp đủ bảng), tránh bị Python sys.modules ghi đè
-        builtins_dict = dict(__builtins__ if isinstance(__builtins__, dict) else __builtins__.__dict__)
-        orig_import = builtins_dict.get("__import__")
-
-        def _custom_import(name, *args, **kwargs):
-            if name == "duckdb":
-                return duckdb_proxy
-            if orig_import:
-                return orig_import(name, *args, **kwargs)
-            return __import__(name, *args, **kwargs)
-
-        builtins_dict["__import__"] = _custom_import
+        safe_import = make_safe_import(duckdb_proxy, pd, np)
+        builtins_dict = make_safe_builtins(safe_import)
 
         env = {
             "__builtins__": builtins_dict,
@@ -552,17 +683,7 @@ class PythonSandbox:
             except Exception:
                 pass
 
-            # 2. Ngắt Python thread đang chạy bằng cách inject ngoại lệ SystemExit
-            if worker_tid[0] is not None:
-                try:
-                    ctypes.pythonapi.PyThreadState_SetAsyncExc(
-                        ctypes.c_long(worker_tid[0]),
-                        ctypes.py_object(SystemExit),
-                    )
-                except Exception:
-                    pass
-
-            # 3. Đóng executor không block luồng chính
+            # 2. Đóng executor không block luồng chính (không dùng ctypes để tránh hỏng bộ nhớ/crash CPython)
             executor.shutdown(wait=False, cancel_futures=True)
             return {
                 "ok": False,
@@ -704,3 +825,7 @@ class PythonSandbox:
             as_of_date=as_of_date,
             date_context=date_context,
         )
+
+
+Sandbox = PythonSandbox
+

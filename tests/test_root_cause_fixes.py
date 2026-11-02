@@ -186,9 +186,9 @@ def test_sandbox_while_loop_routed_to_subprocess_and_terminates(tmp_path: Path):
     không để lại zombie thread chiếm CPU in-process.
     """
     code_while = """
-import time
+i = 0
 while True:
-    time.sleep(0.01)
+    i += 1
 """
     assert has_while_loop(code_while) is True
     assert has_while_loop("for i in range(10): pass") is False

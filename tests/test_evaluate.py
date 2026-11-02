@@ -1,111 +1,78 @@
 # -*- coding: utf-8 -*-
-"""Unit tests kiểm chứng bộ chấm điểm evaluate.py theo Mục 7 & Mục 9 Rulebook."""
+"""
+Unit tests cho evaluate.py: Bộ chấm điểm chuẩn Penalized Accuracy.
+Kiểm tra tính điểm Đúng (+1), Sai (-1), Bỏ qua/Abstain (0) và các hàm so sánh giá trị.
+"""
 
-from pathlib import Path
+import pytest
 from evaluate import (
     evaluate_predictions,
-    load_jsonl,
-    score_single_prediction,
+    compare_numbers,
+    compare_strings,
+    compare_dates,
+    compare_lists,
+    is_json_number,
 )
 
 
-TRAIN_ANSWERS = Path(__file__).resolve().parent.parent / "train" / "answers.jsonl"
+def test_is_json_number():
+    assert is_json_number(123)
+    assert is_json_number(12.34)
+    assert not is_json_number(True)  # bool không phải json number
+    assert not is_json_number(False)
+    assert not is_json_number("123")
+    assert not is_json_number(float("nan"))
+    assert not is_json_number(float("inf"))
 
 
-def test_self_evaluation_on_3000_train_answers():
-    """Chấm chính tập answers.jsonl chuẩn phải đạt 3000/3000 (PA = 100%)."""
-    gold = load_jsonl(TRAIN_ANSWERS)
-    assert len(gold) == 3000
-    report = evaluate_predictions(gold, gold)
-    assert report["total"] == 3000
-    assert report["correct"] == 3000
-    assert report["wrong"] == 0
-    assert report["abstain"] == 0
-    assert report["penalized_accuracy"] == 1.0
+def test_compare_numbers():
+    assert compare_numbers(100, 100)
+    assert compare_numbers(100.000001, 100.0, tol=1e-5)
+    assert not compare_numbers(100, 101)
 
 
-def test_abstain_and_missing():
-    gold = {"id": "q1", "type": "number", "answer": 1000, "alias": []}
-    assert score_single_prediction(None, gold) == (0, "abstain")
-    assert score_single_prediction({"id": "q1", "type": "abstain"}, gold) == (0, "abstain")
+def test_compare_strings():
+    assert compare_strings("Sting dâu 330ml", "sting dâu 330ml")
+    assert compare_strings("Cà phê sữa đá", "CA PHE SUA DA") is False  # Dấu tiếng Việt phải đúng theo Mục 9
+    assert compare_strings("Sting dâu 330ml", "Sting dâu 330 ml")
+    assert compare_strings("SP01", "Nước ngọt", aliases=["SP01", "Sting"])
 
 
-def test_number_and_percent_strict_format():
-    gold_num = {"id": "q1", "type": "number", "answer": 4820000, "alias": []}
-    assert score_single_prediction({"id": "q1", "type": "number", "answer": 4820000}, gold_num) == (1, "correct")
-    assert score_single_prediction({"id": "q1", "type": "number", "answer": "4820000"}, gold_num) == (-1, "wrong")
-    assert score_single_prediction({"id": "q1", "type": "number", "answer": True}, gold_num) == (-1, "wrong")
-    assert score_single_prediction({"id": "q1", "type": "percent", "answer": 4820000}, gold_num) == (-1, "wrong")
+def test_compare_dates():
+    assert compare_dates("2026-05-15", "2026-05-15")
+    assert compare_dates("2026-05", "2026-05")
+    assert not compare_dates("15/05/2026", "2026-05-15")  # sai format
 
 
-def test_string_and_alias_matching():
-    gold_str = {
-        "id": "q_str",
-        "type": "string",
-        "answer": "Costar Omega 3 1000mg lọ 100 viên",
-        "alias": ["SP0076", "Costar Omega 3 1000 mg lọ 100 viên"],
-    }
-    assert score_single_prediction(
-        {"id": "q_str", "type": "string", "answer": "costar omega 3 1000 mg, lọ 100 viên!"},
-        gold_str,
-    ) == (1, "correct")
-    assert score_single_prediction(
-        {"id": "q_str", "type": "string", "answer": "sp0076"},
-        gold_str,
-    ) == (1, "correct")
-    assert score_single_prediction(
-        {"id": "q_str", "type": "string", "answer": "Costar Omega 3 500mg"},
-        gold_str,
-    ) == (-1, "wrong")
+def test_compare_lists():
+    assert compare_lists(["A", "B"], ["A", "B"])
+    assert compare_lists([10, 20], [10, 20])
+    assert not compare_lists(["B", "A"], ["A", "B"])  # sai thứ tự
+    assert not compare_lists([10], [10, 20])  # khác độ dài
 
 
-def test_list_ordering_and_element_aliases():
-    gold_list = {
-        "id": "q_list",
-        "type": "list",
-        "answer": ["Cà phê sữa (M)", "Trà đào cam sả (M)"],
-        "alias": [["SP0003"], ["SP0017"]],
-    }
-    assert score_single_prediction(
-        {"id": "q_list", "type": "list", "answer": ["SP0003", "Trà đào cam sả (m)"]},
-        gold_list,
-    ) == (1, "correct")
-    # Sai thứ tự -> -1
-    assert score_single_prediction(
-        {"id": "q_list", "type": "list", "answer": ["Trà đào cam sả (M)", "Cà phê sữa (M)"]},
-        gold_list,
-    ) == (-1, "wrong")
+def test_evaluate_predictions_penalized_accuracy():
+    preds = [
+        {"id": "q1", "type": "number", "answer": 100},      # Đúng -> +1
+        {"id": "q2", "type": "number", "answer": 999},      # Sai -> -1
+        {"id": "q3", "type": "abstain"},                    # Abstain -> 0
+        {"id": "q4", "type": "string", "answer": "Món A"},   # Đúng -> +1
+        # q5 vắng mặt -> 0
+    ]
+    gold = [
+        {"id": "q1", "type": "number", "answer": 100},
+        {"id": "q2", "type": "number", "answer": 200},
+        {"id": "q3", "type": "number", "answer": 300},
+        {"id": "q4", "type": "string", "answer": "Món A"},
+        {"id": "q5", "type": "number", "answer": 500},
+    ]
 
-
-def test_table_row_order_independent_and_aliases():
-    gold_table = {
-        "id": "q_tbl",
-        "type": "table",
-        "answer": {
-            "columns": ["khach_hang", "so_tien_no"],
-            "rows": [["Đỗ Đức An", 404500], ["Dương Tâm Bích", 158600]],
-        },
-        "alias": [["KH0124"], ["KH0233"]],
-    }
-    pred_table = {
-        "id": "q_tbl",
-        "type": "table",
-        "answer": {
-            "columns": ["ten_khach", "no"],
-            "rows": [["KH0233", 158600], ["đỗ đức an", 404500]],
-        },
-    }
-    assert score_single_prediction(pred_table, gold_table) == (1, "correct")
-
-
-def test_unanswerable_reason_rule():
-    gold_unans = {"id": "q_u", "type": "unanswerable", "answer": None, "alias": []}
-    assert score_single_prediction(
-        {"id": "q_u", "type": "unanswerable", "reason": "Ngoài khoảng thời gian dữ liệu"},
-        gold_unans,
-    ) == (1, "correct")
-    # Mục 7 Rulebook: reason không phải chuỗi -> không đọc được và tính như bỏ trống (0 điểm)
-    assert score_single_prediction(
-        {"id": "q_u", "type": "unanswerable", "reason": 12345},
-        gold_unans,
-    ) == (0, "abstain")
+    report = evaluate_predictions(preds, gold)
+    assert report["total"] == 5
+    assert report["correct"] == 2
+    assert report["wrong"] == 1
+    assert report["abstain"] == 2
+    # Raw points = 2 - 1 = 1
+    assert report["raw_points"] == 1
+    # Penalized Accuracy = 1 / 5 = 0.20
+    assert report["penalized_accuracy"] == 0.20

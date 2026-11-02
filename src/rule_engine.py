@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from src.vietnamese_normalizer import VietnameseNormalizer
+
 
 def strip_accents(text: str) -> str:
     """Loại bỏ dấu tiếng Việt và đưa về chữ thường để so khớp thực thể mềm."""
@@ -82,6 +84,10 @@ class DynamicEntityGrounder:
 
         self._cache[business_id] = entity_map
         return entity_map
+
+    def ground(self, business_id: str, question: str, tables: Dict[str, Any]) -> str:
+        """Alias cho find_grounding_hints."""
+        return self.find_grounding_hints(question, business_id, tables)
 
     def find_grounding_hints(self, question: str, business_id: str, tables: Dict[str, Any]) -> str:
         """
@@ -226,6 +232,15 @@ class RulebookKnobReader:
 class RuleEngine:
     """Bộ phân tích câu hỏi và trích xuất luật nghiệp vụ theo BIRD Knowledge Injection paradigm."""
 
+    strip_accents = staticmethod(strip_accents)
+
+    @classmethod
+    def read_rulebook_knobs(cls, path: Any) -> Dict[str, Any]:
+        if not path or not Path(path).exists():
+            return RulebookKnobReader.parse_knobs("").__dict__
+        text = Path(path).read_text(encoding="utf-8")
+        return RulebookKnobReader.parse_knobs(text).__dict__
+
     def __init__(self, rulebook_path: Path = DEFAULT_RULEBOOK_PATH) -> None:
         self.rulebook_path = rulebook_path
         self.sections: Dict[str, str] = {}
@@ -257,38 +272,8 @@ class RuleEngine:
 
     @staticmethod
     def normalize_telex_typos(s: str) -> str:
-        """Chuẩn hóa một số lỗi gõ Telex phổ biến: naof -> nào, thangs -> tháng, cuwar -> cửa, nhaf -> nhà, v.v."""
-        s = re.sub(r"\bnaof\b", "nào", s)
-        s = re.sub(r"\bthangs\b", "tháng", s)
-        s = re.sub(r"\bcuwar\b", "cửa", s)
-        s = re.sub(r"\bnhaf\b", "nhà", s)
-        s = re.sub(r"\bduocj\b", "được", s)
-        s = re.sub(r"\bbani\b", "bán", s)
-        s = re.sub(r"\btieenf\b", "tiền", s)
-        s = re.sub(r"\bcuoois\b", "cuối", s)
-        s = re.sub(r"\bcuar\b", "của", s)
-        s = re.sub(r"\bnhoms\b", "nhóm", s)
-        s = re.sub(r"\blaf\b", "là", s)
-        s = re.sub(r"\bhown\b", "hơn", s)
-        s = re.sub(r"\btrar\b", "trả", s)
-        s = re.sub(r"\bhees\b", "hết", s)
-        s = re.sub(r"\bngayf\b", "ngày", s)
-        s = re.sub(r"\bnhaats\b", "nhất", s)
-        s = re.sub(r"\btrawm\b", "trăm", s)
-        s = re.sub(r"\bnhieeuf\b", "nhiều", s)
-        s = re.sub(r"\bnhieeu\b", "nhiều", s)
-        s = re.sub(r"\bbieets\b", "biết", s)
-        s = re.sub(r"\bvaayj\b", "vậy", s)
-        s = re.sub(r"\bddown\b", "đơn", s)
-        s = re.sub(r"\bsoos\b", "số", s)
-        s = re.sub(r"\bcos\b", "có", s)
-        s = re.sub(r"\bmawtj\b", "mặt", s)
-        s = re.sub(r"\bhangf\b", "hàng", s)
-        s = re.sub(r"\bcungf\b", "cùng", s)
-        s = re.sub(r"\bthuoocs\b", "thuốc", s)
-        s = re.sub(r"\bmaays\b", "mấy", s)
-        s = re.sub(r"\bconf\b", "còn", s)
-        return s
+        """Chuẩn hóa lỗi gõ Telex và Unicode NFC bằng VietnameseNormalizer theo chuẩn ViLexNorm."""
+        return VietnameseNormalizer.clean_deterministic(s)
 
     @staticmethod
     def infer_expected_type(question: str) -> str:
@@ -482,7 +467,16 @@ class RuleEngine:
         # 1. Kiểm tra ngày ngoài khoảng dữ liệu của shop (chỉ áp dụng cho kỳ bán hàng, không áp dụng cho hạn dùng trong tương lai)
         is_expiry_q = any(k in q for k in ["hạn dùng", "han dung", "hạn sử dụng", "han su dung", "hsd", "hết hạn trong", "het han trong", "hết hạn vào", "het han vao"])
         if not is_expiry_q:
-            s_min, s_max = store.get_shop_date_range(bid)
+            if hasattr(store, "get_shop_date_range"):
+                s_min, s_max = store.get_shop_date_range(bid)
+            elif hasattr(store, "get_date_range"):
+                s_min, s_max = store.get_date_range(bid)
+            else:
+                s_min, s_max = None, None
+
+            if s_min is None and s_max is None:
+                return True, "Shop không có dữ liệu bán hàng theo ngày."
+
             s_max_effective = max(s_max, as_of) if (as_of and s_max) else (s_max or as_of)
             d_ctx = date_resolver.resolve(question_obj.get("question", ""), as_of)
             for p in d_ctx.get("detected_periods", []):
@@ -492,13 +486,13 @@ class RuleEngine:
                     if en < s_min or (s_max_effective and st > s_max_effective):
                         return True, f"Kỳ hỏi ({st} đến {en}) nằm hoàn toàn ngoài khoảng ngày có dữ liệu của shop ({s_min} đến {s_max_effective})."
 
-        tables = store.load_tables(bid)
-        all_cols = {c.lower() for df in tables.values() for c in df.columns}
+        tables = store.load_tables(bid) if hasattr(store, "load_tables") else {}
+        all_cols = {c.lower() for df in tables.values() for c in getattr(df, "columns", [])}
         all_tbl_names = {t.lower() for t in tables.keys()}
 
-        # 2. Câu hỏi cảm tính / thái độ / kỹ năng
-        if any(k in q for k in ["tận tâm", "nhiệt tình", "thái độ", "tốt bụng", "lễ phép", "chu đáo", "tay nghề"]):
-            return True, "Dữ liệu shop không có cột đánh giá cảm tính, thái độ hoặc tay nghề."
+        # 2. Câu hỏi cảm tính / thái độ / kỹ năng / chất lượng dịch vụ
+        if any(k in q for k in ["tận tâm", "nhiệt tình", "thái độ", "tốt bụng", "lễ phép", "chu đáo", "tay nghề", "mấy sao", "chất lượng dịch vụ", "đánh giá sao"]):
+            return True, "Dữ liệu shop không có cột đánh giá cảm tính, thái độ hoặc chất lượng dịch vụ."
 
         # 3. Kiến thức y khoa / liều dùng ngoài dữ liệu
         if any(k in q for k in ["uống mỗi lần", "liều dùng", "cách dùng", "uống bao nhiêu viên", "uống mấy gói"]):
@@ -509,12 +503,12 @@ class RuleEngine:
             if not any(any(k in c for k in ["lý do", "lí do", "nguyên nhân", "ly_do", "reason"]) for c in all_cols):
                 return True, "Shop không có cột ghi nhận lý do hủy/trả đơn hàng."
 
-        # 5. Địa chỉ / đường phố của khách hàng
-        sugar_words = ["đường đen", "đường phèn", "đường cát", "đường mía", "đường thốt nốt", "duong den", "duong phen", "duong cat"]
-        q_no_sugar = q
-        for sw in sugar_words:
-            q_no_sugar = q_no_sugar.replace(sw, "sugar")
-        if any(k in q_no_sugar for k in ["khách ở đường", "khách đường", "ở đường ", "tại đường ", "khach o duong", "o duong "]):
+        # 5. Địa chỉ / đường phố của khách hàng (nhận diện theo cấu trúc ngữ cảnh địa chỉ, không hardcode từ điển)
+        is_street_address_query = bool(re.search(
+            r"\b(?:khách\s+(?:hàng\s+)?(?:ở|tại)\s+đường|tại\s+đường\s+[a-zà-ỹ0-9]|ở\s+đường\s+[a-zà-ỹ0-9]|địa\s+chỉ\s+(?:nhà|của\s+khách|giao)|tên\s+đường\s+của\s+khách)\b",
+            q
+        ))
+        if is_street_address_query:
             if not any(any(k in c for k in ["địa chỉ", "dia_chi", "đường", "duong", "address"]) for c in all_cols):
                 return True, "Shop không có thông tin địa chỉ hoặc tên đường của khách hàng."
 

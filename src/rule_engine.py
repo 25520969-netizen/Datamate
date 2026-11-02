@@ -485,6 +485,8 @@ class RuleEngine:
                 if st and en:
                     if en < s_min or (s_max_effective and st > s_max_effective):
                         return True, f"Kỳ hỏi ({st} đến {en}) nằm hoàn toàn ngoài khoảng ngày có dữ liệu của shop ({s_min} đến {s_max_effective})."
+                    if as_of and st > as_of and any(k in q for k in ["doanh thu", "bán được", "đơn hàng", "tiền hàng", "bán chạy", "khách mua"]):
+                        return True, f"Kỳ hỏi ({st} đến {en}) nằm trong tương lai sau ngày hiện tại ({as_of}), chưa có dữ liệu giao dịch phát sinh."
 
         tables = store.load_tables(bid) if hasattr(store, "load_tables") else {}
         all_cols = {c.lower() for df in tables.values() for c in getattr(df, "columns", [])}
@@ -494,9 +496,11 @@ class RuleEngine:
         if any(k in q for k in ["tận tâm", "nhiệt tình", "thái độ", "tốt bụng", "lễ phép", "chu đáo", "tay nghề", "mấy sao", "chất lượng dịch vụ", "đánh giá sao"]):
             return True, "Dữ liệu shop không có cột đánh giá cảm tính, thái độ hoặc chất lượng dịch vụ."
 
-        # 3. Kiến thức y khoa / liều dùng ngoài dữ liệu
+        # 3. Kiến thức y khoa / liều dùng / tác dụng phụ / chống chỉ định ngoài dữ liệu
         if any(k in q for k in ["uống mỗi lần", "liều dùng", "cách dùng", "uống bao nhiêu viên", "uống mấy gói"]):
             return True, "Liều dùng y tế là kiến thức bên ngoài, không ghi trong dữ liệu danh mục hàng."
+        if any(k in q for k in ["tác dụng phụ", "tac dung phu", "chống chỉ định", "chong chi dinh", "dị ứng", "di ung", "tương tác thuốc"]):
+            return True, "Tác dụng phụ và chống chỉ định y tế là kiến thức dược lý bên ngoài, không có trong dữ liệu bán hàng."
 
         # 4. Lý do hủy đơn hàng
         if any(k in q for k in ["vì giao trễ", "vi giao tre", "lý do hủy", "lý do huỷ", "lí do hủy", "lí do huỷ", "ly do huy", "li do"]):
@@ -541,6 +545,26 @@ class RuleEngine:
             has_stock_col = any(any(k in c for k in ["tồn cuối", "tồn thực", "ton kho", "tồn kho", "sl nhập", "số lượng nhập"]) for c in all_cols)
             if not (has_stock_tbl or has_stock_col):
                 return True, "Shop chỉ có dữ liệu bán hàng, không có bảng tồn kho hoặc dữ liệu nhập hàng để tính tồn kho."
+
+        # 11. Nhiệt độ bảo quản / độ ẩm môi trường / điều kiện bảo quản kho
+        if any(k in q for k in ["nhiệt độ bảo quản", "nhiet do bao quan", "nhiệt độ kho", "độ ẩm kho", "do am kho", "bảo quản ở nhiệt độ"]):
+            has_temp_col = any(any(k in c for k in ["nhiệt độ", "nhiet_do", "độ ẩm", "do_am", "temperature", "humidity"]) for c in all_cols)
+            if not has_temp_col:
+                return True, "Dữ liệu shop không theo dõi nhiệt độ hoặc độ ẩm bảo quản kho."
+
+        # 12. Định vị GPS / bản đồ / khoảng cách địa lý ngoài dữ liệu bán hàng
+        if any(k in q for k in ["khoảng cách từ", "khoang cach tu", "cách bao xa", "cach bao xa", "mấy cây số", "mấy km", "google maps", "bản đồ"]):
+            return True, "Dữ liệu shop không lưu trữ tọa độ GPS hay khoảng cách địa lý giao vận."
+
+        # 13. Thời tiết / khí tượng
+        if any(k in q for k in ["thời tiết", "thoi tiet", "dự báo thời tiết", "trời mưa hay nắng", "lượng mưa"]):
+            return True, "Dữ liệu kinh doanh không bao gồm thông tin thời tiết hay khí tượng."
+
+        # 14. Lịch trình giao thông / vé máy bay / tàu xe công cộng
+        if any(k in q for k in ["lịch tàu", "lịch xe", "vé máy bay", "ve may bay", "chuyến bay", "bến xe"]):
+            has_transport = any(any(k in t for k in ["ve_may_bay", "chuyen_bay", "tau_xe"]) for t in all_tbl_names)
+            if not has_transport:
+                return True, "Dữ liệu bán lẻ không bao gồm lịch trình vận tải hành khách công cộng."
 
         return False, ""
 

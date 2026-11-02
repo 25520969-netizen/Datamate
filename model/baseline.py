@@ -11,6 +11,7 @@ Kết hợp:
 
 import json
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -22,7 +23,13 @@ from urllib3.util import Retry
 
 from src.date_resolver import DateResolver
 from src.ingest import BusinessDataStore
-from src.postprocess import check_consensus, postprocess_and_guard
+from src.postprocess import (
+    are_strings_in_consensus,
+    check_consensus,
+    postprocess_and_guard,
+    round_half_up_2dec,
+    round_half_up_int,
+)
 from src.rule_engine import DAILFewShotSelector, DynamicEntityGrounder, RuleEngine
 from src.sandbox import PythonSandbox
 from src.vietnamese_normalizer import VietnameseNormalizer
@@ -38,6 +45,15 @@ DEFAULT_MODEL = DEFAULT_QWEN_14B_AWQ_MODEL
 # -----------------------------------------------------------------------------
 SYSTEM_PROMPT_SQL = """Bạn là Kỹ sư Dữ liệu chuyên về SQL và DuckDB giải quyết bài toán DataMate (Zalo AI Challenge 2026).
 Nhiệm vụ: Viết một đoạn mã Python truy vấn dữ liệu từ kết nối DuckDB `con` (đã đăng ký sẵn toàn bộ bảng dữ liệu) để trả lời câu hỏi.
+
+=== 4 TIÊN ĐỀ NGHIỆP VỤ BẮT BUỘC (RULEBOOK 2026) ===
+1. CHẶN TRÊN NGÀY HIỆN TẠI (AS OF DATE): Mọi truy vấn doanh thu, số đơn, bán chạy BẮT BUỘC có điều kiện:
+   WHERE ("date_iso" <= '{as_of_date}' OR CAST("Ngày" AS DATE) <= DATE '{as_of_date}') (các giao dịch phát sinh sau hôm nay coi như chưa xảy ra).
+2. DOANH THU CHUẨN (MỤC 1): Doanh thu = SUM(COALESCE("revenue_norm", "Thành tiền", "Tổng tiền", 0)) của đơn KHÔNG HỦY và KHÔNG TRẢ (status_norm = 'Hoàn thành' hoặc Trạng thái NOT ILIKE '%hủy%' AND Trạng thái NOT ILIKE '%trả%'). Tuyệt đối không trừ voucher cả đơn, không cộng VAT/phí ship.
+3. KHÁCH HÀNG THẬT (MỤC 3): Khách lẻ không phải khách. BẮT BUỘC loại bỏ khi đếm hoặc xếp hạng khách:
+   WHERE "Khách hàng" NOT ILIKE '%khách lẻ%' AND "Khách hàng" NOT ILIKE '%lẻ%' AND "Khách hàng" NOT ILIKE '%vãng lai%' AND "Khách hàng" IS NOT NULL.
+4. BÁN CHẠY NHẤT (MỤC 3 & 10): Luôn xếp theo SẢN LƯỢNG QUY ĐỔI ĐƠN VỊ CƠ BẢN:
+   ORDER BY SUM(COALESCE("qty_base", "Số lượng", 0)) DESC LIMIT N (Tuyệt đối không xếp theo tiền).
 
 QUY TẮC CỐT LÕI (DUCKDB SQL):
 1. Ưu tiên giải bài toán bằng truy vấn `con.execute(\"\"\"SELECT ...\"\"\")`:
@@ -74,6 +90,15 @@ QUY TẮC CỐT LÕI (DUCKDB SQL):
 # -----------------------------------------------------------------------------
 SYSTEM_PROMPT_DEFENSIVE_SQL = """Bạn là Chuyên gia Khoa học Dữ liệu chú trọng tính chính xác và kiểm soát rủi ro biên (DataMate 2026).
 Nhiệm vụ: Viết một đoạn mã Python truy vấn dữ liệu từ kết nối DuckDB `con` độc lập để trả lời câu hỏi.
+
+=== 4 TIÊN ĐỀ NGHIỆP VỤ BẮT BUỘC (RULEBOOK 2026) ===
+1. CHẶN TRÊN NGÀY HIỆN TẠI (AS OF DATE): Mọi truy vấn doanh thu, số đơn, bán chạy BẮT BUỘC có điều kiện:
+   WHERE ("date_iso" <= '{as_of_date}' OR CAST("Ngày" AS DATE) <= DATE '{as_of_date}') (các giao dịch phát sinh sau hôm nay coi như chưa xảy ra).
+2. DOANH THU CHUẨN (MỤC 1): Doanh thu = SUM(COALESCE("revenue_norm", "Thành tiền", "Tổng tiền", 0)) của đơn KHÔNG HỦY và KHÔNG TRẢ (status_norm = 'Hoàn thành' hoặc Trạng thái NOT ILIKE '%hủy%' AND Trạng thái NOT ILIKE '%trả%'). Tuyệt đối không trừ voucher cả đơn, không cộng VAT/phí ship.
+3. KHÁCH HÀNG THẬT (MỤC 3): Khách lẻ không phải khách. BẮT BUỘC loại bỏ khi đếm hoặc xếp hạng khách:
+   WHERE "Khách hàng" NOT ILIKE '%khách lẻ%' AND "Khách hàng" NOT ILIKE '%lẻ%' AND "Khách hàng" NOT ILIKE '%vãng lai%' AND "Khách hàng" IS NOT NULL.
+4. BÁN CHẠY NHẤT (MỤC 3 & 10): Luôn xếp theo SẢN LƯỢNG QUY ĐỔI ĐƠN VỊ CƠ BẢN:
+   ORDER BY SUM(COALESCE("qty_base", "Số lượng", 0)) DESC LIMIT N (Tuyệt đối không xếp theo tiền).
 
 QUY TẮC CỐT LÕI (DEFENSIVE VERIFICATION DUCKDB ENGINE):
 1. Tổ chức truy vấn kiểm soát dữ liệu chặt chẽ:
@@ -580,7 +605,7 @@ class DataMateAgent:
         # Nếu cấu hình single prompt mode (chỉ Prompt 1)
         if self.consensus_mode == "single":
             pred1, code1, raw1 = self._solve_single_prompt(
-                system_prompt=SYSTEM_PROMPT_SQL,
+                system_prompt=SYSTEM_PROMPT_SQL.replace("{as_of_date}", as_of_date),
                 user_prompt=user_prompt,
                 qid=qid,
                 business_id=business_id,
@@ -615,7 +640,7 @@ class DataMateAgent:
         with ThreadPoolExecutor(max_workers=2) as executor:
             fut1 = executor.submit(
                 self._solve_single_prompt,
-                system_prompt=SYSTEM_PROMPT_SQL,
+                system_prompt=SYSTEM_PROMPT_SQL.replace("{as_of_date}", as_of_date),
                 user_prompt=user_prompt,
                 qid=qid,
                 business_id=business_id,
@@ -627,7 +652,7 @@ class DataMateAgent:
             )
             fut2 = executor.submit(
                 self._solve_single_prompt,
-                system_prompt=SYSTEM_PROMPT_DEFENSIVE_SQL,
+                system_prompt=SYSTEM_PROMPT_DEFENSIVE_SQL.replace("{as_of_date}", as_of_date),
                 user_prompt=user_prompt,
                 qid=qid,
                 business_id=business_id,
@@ -678,36 +703,50 @@ class DataMateAgent:
                 if pred1.get("type") == "list":
                     a1 = pred1.get("answer") or []
                     a2 = pred2.get("answer") or []
-                    final_pred = pred1 if len(a1) >= len(a2) else pred2
+                    m_top = re.search(r"\btop\s*(\d+)\b", q_low)
+                    if m_top:
+                        k = int(m_top.group(1))
+                        cut_len = min(len(a1), len(a2), k)
+                        final_list = a1[:cut_len] if len(a1) >= cut_len else a2[:cut_len]
+                        final_pred = {"id": qid, "type": "list", "answer": final_list}
+                    elif len(a1) == len(a2):
+                        final_pred = pred1
+                    else:
+                        min_len = min(len(a1), len(a2))
+                        final_pred = {"id": qid, "type": "list", "answer": a1[:min_len]}
                 else:
                     final_pred = pred1
                 decision_reason = "consensus_match"
             else:
-                # Query-Feature Arbitration (Paper Lee & Lee 2024 / Borchmann 2025):
-                # 1. Khi câu hỏi hỏi số lượng đơn hàng, nếu P1 dùng COUNT(DISTINCT ...) để chống nhân đôi dòng
-                # từ bảng chi tiết trong khi P2 dùng COUNT(*) đơn thuần -> Ưu tiên P1 với độ tin cậy tuyệt đối.
+                # Query-Feature Smart Tiered Arbitration (Schema-Agnostic Relational Logic):
+                # 1. Khi câu hỏi hỏi số lượng đơn hàng, ưu tiên bên dùng COUNT(DISTINCT ...) để chống nhân đôi dòng
                 is_order_cnt_q = any(k in q_low for k in ["mấy đơn", "may don", "nhiêu đơn", "nhieu don", "bao nhiêu đơn", "bao nhiu don", "bn đơn", "bn don", "số đơn", "so don", "mấy hóa đơn", "mấy phiếu", "mấy gd"])
                 p1_has_distinct = "COUNT(DISTINCT" in p1_code_str.upper()
                 p2_has_distinct = "COUNT(DISTINCT" in p2_code_str.upper()
 
                 # 2. Trọng tài Tỉ lệ đơn hủy (Cancellation Rate Arbitration):
-                # Khi câu hỏi hỏi tỉ lệ hủy đơn, nếu một bên ra 0.0% do lọc WHERE 'Đã hủy' ở CTE valid_orders,
+                # Nếu một bên ra 0.0% do lọc WHERE 'Đã hủy' ở CTE valid_orders,
                 # trong khi bên kia tính đúng tỉ lệ thực tế (0 < rate <= 50.0%) -> Ưu tiên bên có tỉ lệ thực tế.
                 is_cancel_rate_q = any(k in q_low for k in ["đơn huỷ", "đơn hủy", "huỷ đơn", "hủy đơn"]) and any(k in q_low for k in ["tỉ lệ", "tỷ lệ", "%", "phần trăm", "bn %"])
                 p1_rate = pred1.get("answer") if pred1.get("type") == "percent" else None
                 p2_rate = pred2.get("answer") if pred2.get("type") == "percent" else None
 
-                # 3. Trọng tài Doanh thu bảng Master vs Detail Bloat (Master-Detail Join Bloat Arbitration):
-                # Khi hỏi doanh thu, nếu P2 JOIN bảng Hóa đơn với Hóa đơn Chi tiết dẫn tới số tiền bị nhân đôi dòng >= 1.4 lần P1,
-                # trong khi P1 truy vấn trực tiếp từ bảng Hóa đơn master -> Ưu tiên P1.
+                # 3. Trọng tài Doanh thu bảng Master vs Detail Bloat (Schema-Agnostic JOIN Bloat Arbitration):
+                # Nếu một bên dùng JOIN gây nhân bản dòng (Cartesian product) dẫn tới số tiền >= 1.4 lần bên không dùng JOIN -> Ưu tiên bên không dùng JOIN.
                 is_revenue_q = any(k in q_low for k in ["doanh thu", "dthu", "tiền", "tổng dthu", "tổng cộng bao nhiêu tiền", "doanh số"]) and not any(k in q_low for k in ["kho", "tồn"])
                 p1_num = pred1.get("answer") if pred1.get("type") == "number" else None
                 p2_num = pred2.get("answer") if pred2.get("type") == "number" else None
+                p1_has_join = bool(re.search(r"\bjoin\b", p1_code_str, re.I))
+                p2_has_join = bool(re.search(r"\bjoin\b", p2_code_str, re.I))
 
                 if pred1.get("type") == "number" and is_order_cnt_q and p1_has_distinct and not p2_has_distinct:
                     is_consensus = False
                     final_pred = pred1
                     decision_reason = "p1_distinct_semantic_arbitration"
+                elif pred2.get("type") == "number" and is_order_cnt_q and p2_has_distinct and not p1_has_distinct:
+                    is_consensus = False
+                    final_pred = pred2
+                    decision_reason = "p2_distinct_semantic_arbitration"
                 elif is_cancel_rate_q and (p2_rate == 0.0 or p2_rate is None) and isinstance(p1_rate, (int, float)) and 0 < float(p1_rate) <= 50.0:
                     is_consensus = False
                     final_pred = pred1
@@ -716,10 +755,14 @@ class DataMateAgent:
                     is_consensus = False
                     final_pred = pred2
                     decision_reason = "p2_cancel_rate_arbitration"
-                elif is_revenue_q and isinstance(p1_num, (int, float)) and isinstance(p2_num, (int, float)) and p2_num >= 1.4 * p1_num and ("DanhSachHoaDonChiTiet" in p2_code_str and "DanhSachHoaDon" in p2_code_str):
+                elif is_revenue_q and isinstance(p1_num, (int, float)) and isinstance(p2_num, (int, float)) and p2_has_join and not p1_has_join and p2_num >= 1.4 * p1_num:
                     is_consensus = False
                     final_pred = pred1
-                    decision_reason = "p1_revenue_master_arbitration"
+                    decision_reason = "p1_revenue_no_join_bloat_arbitration"
+                elif is_revenue_q and isinstance(p1_num, (int, float)) and isinstance(p2_num, (int, float)) and p1_has_join and not p2_has_join and p1_num >= 1.4 * p2_num:
+                    is_consensus = False
+                    final_pred = pred2
+                    decision_reason = "p2_revenue_no_join_bloat_arbitration"
                 elif pred1.get("type") == "number" and pred2.get("type") == "number":
                     p1_has_status = any(k in p1_code_str for k in ("status_norm", "Hoàn thành", "hoàn thành", "hủy", "huy"))
                     p2_has_status = any(k in p2_code_str for k in ("status_norm", "Hoàn thành", "hoàn thành", "hủy", "huy"))
@@ -727,6 +770,14 @@ class DataMateAgent:
                         is_consensus = False
                         final_pred = pred1
                         decision_reason = "p1_status_filter_semantic_arbitration"
+                    elif p2_has_status and not p1_has_status and isinstance(p1_num, (int, float)) and isinstance(p2_num, (int, float)) and p1_num >= p2_num:
+                        is_consensus = False
+                        final_pred = pred2
+                        decision_reason = "p2_status_filter_semantic_arbitration"
+                    elif isinstance(p1_num, (int, float)) and isinstance(p2_num, (int, float)) and round_half_up_int(p1_num) == round_half_up_int(p2_num):
+                        is_consensus = True
+                        final_pred = {"id": qid, "type": "number", "answer": round_half_up_int(p1_num)}
+                        decision_reason = "post_rounding_consensus"
                     else:
                         is_consensus = False
                         final_pred = {"id": qid, "type": "abstain"}
@@ -757,6 +808,24 @@ class DataMateAgent:
                         is_consensus = False
                         final_pred = {"id": qid, "type": "abstain"}
                         decision_reason = "table_disagreement_abstain"
+                elif pred1.get("type") == "list" and pred2.get("type") == "list":
+                    a1 = pred1.get("answer") or []
+                    a2 = pred2.get("answer") or []
+                    m_top = re.search(r"\btop\s*(\d+)\b", q_low)
+                    if m_top:
+                        k = int(m_top.group(1))
+                        if len(a1) >= k and len(a2) >= k and all(are_strings_in_consensus(a1[i], a2[i]) for i in range(k)):
+                            is_consensus = True
+                            final_pred = {"id": qid, "type": "list", "answer": a1[:k]}
+                            decision_reason = "list_prefix_top_k_consensus"
+                        else:
+                            is_consensus = False
+                            final_pred = {"id": qid, "type": "abstain"}
+                            decision_reason = "consensus_disagreement_abstain"
+                    else:
+                        is_consensus = False
+                        final_pred = {"id": qid, "type": "abstain"}
+                        decision_reason = "consensus_disagreement_abstain"
                 else:
                     # Hai đáp án bất đồng (không qua được check_consensus) -> Safe Abstain (0 điểm)
                     is_consensus = False

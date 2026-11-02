@@ -417,6 +417,9 @@ def normalize_date_value_iso(val: Any) -> Any:
         m_d = pattern.match(s)
         if m_d:
             d_i, m_i, y_i = int(m_d.group(1)), int(m_d.group(2)), int(m_d.group(3))
+            # Tự động phát hiện MM/DD/YYYY khi phần tử tháng > 12 (tháng hợp lệ chỉ từ 1 đến 12)
+            if m_i > 12 and 1 <= d_i <= 12:
+                d_i, m_i = m_i, d_i
             if 1 <= m_i <= 12 and 1 <= d_i <= 31:
                 t_part = m_d.group(4)
                 if t_part and not t_part.startswith("00:00"):
@@ -711,7 +714,7 @@ class BusinessDataStore:
         self._readme_cache[business_id] = content
         return content
 
-    def get_shop_date_range(self, business_id: str) -> Tuple[str, str]:
+    def get_shop_date_range(self, business_id: str) -> Tuple[Optional[str], Optional[str]]:
         """Xác định ngày nhỏ nhất và lớn nhất có dữ liệu bán/nhập hàng của cửa hàng."""
         tables = self.load_tables(business_id)
         all_dts: List[str] = []
@@ -719,7 +722,15 @@ class BusinessDataStore:
             # Bỏ qua bảng thông tin tĩnh khách hàng, sản phẩm, bảng giá (chứa ngày sinh, ngày tạo sản phẩm không phải kỳ kinh doanh)
             if any(ex in tname.lower() for ex in ["khachhang", "khach_hang", "sanpham", "san_pham", "danhmuc", "danh_muc", "hanghoa", "hang_hoa", "banggia", "bang_gia"]):
                 continue
+            if "date_iso" in df.columns:
+                s = df["date_iso"].dropna().astype(str)
+                valid_dates = s[s.str.match(r"^\d{4}-\d{2}-\d{2}")]
+                if len(valid_dates) > 0:
+                    all_dts.append(valid_dates.min()[:10])
+                    all_dts.append(valid_dates.max()[:10])
             for c in df.columns:
+                if c == "date_iso":
+                    continue
                 if any(ex in c.lower() for ex in ["sinh", "birth", "tạo", "tao"]):
                     continue
                 if any(k in c.lower() for k in ["ngày", "thời gian", "ngay", "date"]):
@@ -730,7 +741,7 @@ class BusinessDataStore:
                         all_dts.append(valid_dates.max()[:10])
         if all_dts:
             return (min(all_dts), max(all_dts))
-        return ("2020-01-01", "2030-01-01")
+        return (None, None)
 
     def load_tables(self, business_id: str, use_cache: bool = True) -> Dict[str, pd.DataFrame]:
         """
@@ -856,6 +867,16 @@ class BusinessDataStore:
                     if target not in df.columns:
                         df[target] = df[found_date]
                         synthetic.add(target)
+                if "date_iso" not in df.columns:
+                    s_dt = df[found_date].map(normalize_date_value_iso).astype(str)
+                    df["date_iso"] = s_dt.str.extract(r"(\d{4}-\d{2}-\d{2})")[0].fillna(s_dt.str[:10])
+                    synthetic.add("date_iso")
+                if "order_date_iso" not in df.columns:
+                    df["order_date_iso"] = df["date_iso"]
+                    synthetic.add("order_date_iso")
+                if "timestamp_iso" not in df.columns:
+                    df["timestamp_iso"] = df[found_date].map(normalize_date_value_iso)
+                    synthetic.add("timestamp_iso")
 
             # 7. Trạng thái đơn hàng
             status_syns = ["Trạng thái", "status_norm", "TinhTrang", "Tình trạng", "TrangThai", "Tình trạng đơn", "Trạng thái đơn hàng", "Trạng thái xử lý", "Xử lý"]
@@ -1229,6 +1250,14 @@ class BusinessDataStore:
                 for alias in ("Ngày", "Ngày đặt hàng", "Thời gian"):
                     if alias not in df.columns:
                         df[alias] = df[dt_found]
+                # Chuẩn hóa cưỡng chế date_iso (YYYY-MM-DD), order_date_iso và timestamp_iso
+                if "date_iso" not in df.columns:
+                    s_dt = df[dt_found].map(normalize_date_value_iso).astype(str)
+                    df["date_iso"] = s_dt.str.extract(r"(\d{4}-\d{2}-\d{2})")[0].fillna(s_dt.str[:10])
+                if "order_date_iso" not in df.columns:
+                    df["order_date_iso"] = df["date_iso"]
+                if "timestamp_iso" not in df.columns:
+                    df["timestamp_iso"] = df[dt_found].map(normalize_date_value_iso)
 
             # Nếu cột 'Thời gian' chỉ chứa ngày (không có giờ phút), nhưng có cột datetime chi tiết hơn, ưu tiên cột chi tiết
             if "Thời gian" in df.columns:
@@ -1590,22 +1619,43 @@ class BusinessDataStore:
             only_df = apply_rulebook_section8_cleaning(sheet_dfs[0][1])
             return {file_stem: only_df}
 
-        # Kiểm tra xem tất cả các sheet có cùng tập hợp cột hay không
-        first_cols = tuple(sheet_dfs[0][1].columns)
-        all_same_schema = all(tuple(df.columns) == first_cols for _, df in sheet_dfs)
+        # Kiểm tra độ tương đồng cấu trúc cột giữa các sheet bằng Jaccard Similarity (Schema-Similarity Consolidator)
+        def _schema_jaccard(cols1, cols2) -> float:
+            s1 = {str(c).lower().strip() for c in cols1 if not str(c).startswith("_")}
+            s2 = {str(c).lower().strip() for c in cols2 if not str(c).startswith("_")}
+            if not s1 or not s2:
+                return 0.0
+            return len(s1 & s2) / len(s1 | s2)
 
-        if all_same_schema:
+        ref_cols = sheet_dfs[0][1].columns
+        similar_to_first = [
+            (s_name, df)
+            for s_name, df in sheet_dfs
+            if _schema_jaccard(ref_cols, df.columns) >= 0.70
+        ]
+        dissimilar_sheets = [
+            (s_name, df)
+            for s_name, df in sheet_dfs
+            if _schema_jaccard(ref_cols, df.columns) < 0.70
+        ]
+
+        out: Dict[str, pd.DataFrame] = {}
+        # Nếu từ 2 sheet trở lên có cùng cấu trúc phân mảnh (như 12 tháng hoặc các đợt bán hàng) -> gộp thành master table
+        if len(similar_to_first) >= 2 and len(similar_to_first) >= len(dissimilar_sheets):
             annotated_dfs: List[pd.DataFrame] = []
-            for s_name, df in sheet_dfs:
+            for s_name, df in similar_to_first:
                 df_copy = df.copy()
                 df_copy["_sheet_name"] = s_name
                 annotated_dfs.append(df_copy)
             merged_df = pd.concat(annotated_dfs, ignore_index=True)
             merged_df = apply_rulebook_section8_cleaning(merged_df)
-            return {file_stem: merged_df}
+            out[file_stem] = merged_df
+            # Các sheet có schema hoàn toàn khác (như Danh mục hàng, Bảng giá) giữ nguyên thành bảng riêng
+            for s_name, df in dissimilar_sheets:
+                out[s_name] = apply_rulebook_section8_cleaning(df)
+            return out
 
         # Các sheet là các bảng nghiệp vụ khác nhau
-        out: Dict[str, pd.DataFrame] = {}
         for s_name, df in sheet_dfs:
             out[s_name] = apply_rulebook_section8_cleaning(df)
         return out

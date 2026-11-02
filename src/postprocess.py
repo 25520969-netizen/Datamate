@@ -222,14 +222,26 @@ def postprocess_and_guard(
     elif isinstance(ans_val, bool):
         ans_type = "boolean"
 
-    # Tự động unpack nếu kết quả trả về list 1 phần tử nhưng kiểu kỳ vọng là scalar
-    if ans_type in ("number", "percent", "string", "date", "boolean") and isinstance(ans_val, list) and len(ans_val) == 1:
+    # Tự động unpack triệt để các cấu trúc lồng nhau (list/tuple 1 phần tử từ DuckDB fetchall) về scalar
+    while isinstance(ans_val, (list, tuple)) and len(ans_val) == 1 and ans_type in ("number", "percent", "string", "date", "boolean"):
         ans_val = ans_val[0]
 
     # 1. Xử lý NUMBER
     if ans_type == "number":
         q_low = question.lower()
         q_clean = strip_accents(question)
+        if isinstance(ans_val, str):
+            s_clean = ans_val.strip().replace("đ", "").replace("VND", "").replace("vnd", "").replace("d", "").strip()
+            from src.ingest import parse_vn_numeric_value
+            parsed_num = parse_vn_numeric_value(s_clean)
+            if parsed_num is not None:
+                ans_val = parsed_num
+            else:
+                try:
+                    ans_val = float(s_clean.replace(",", ""))
+                except ValueError:
+                    pass
+
         if isinstance(ans_val, bool) or not isinstance(ans_val, (int, float)):
             return abstain_resp
         if math.isnan(ans_val) or math.isinf(ans_val):
@@ -662,7 +674,15 @@ def check_consensus(pred1: Dict[str, Any], pred2: Dict[str, Any]) -> bool:
             # Khớp tuyệt đối hoặc sai số tương đối cực nhỏ cho số tài chính lớn
             diff = abs(f1 - f2)
             max_val = max(abs(f1), abs(f2))
-            return diff < 1e-4 or (max_val > 0 and diff / max_val < 1e-5)
+            if diff < 1e-4 or (max_val > 0 and diff / max_val < 1e-5):
+                return True
+            # Post-Rounding Consensus: Nếu làm tròn theo luật Mục 9 ra cùng một giá trị
+            # (ví dụ: tiền làm tròn nguyên, hoặc cùng làm tròn 2 chữ số thập phân)
+            if round_half_up_int(f1) == round_half_up_int(f2):
+                return True
+            if round_half_up_2dec(f1) == round_half_up_2dec(f2):
+                return True
+            return False
         except (ValueError, TypeError):
             return False
 

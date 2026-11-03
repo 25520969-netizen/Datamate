@@ -158,6 +158,25 @@ def parse_args() -> argparse.Namespace:
         help="Bật bước viết lại câu hỏi bằng LLM (DART-SQL) trước khi sinh code. Tốn thêm một lượt LLM tuần tự mỗi câu; mặc định tắt.",
     )
     parser.add_argument(
+        "--detail-json",
+        type=Path,
+        default=None,
+        help="Ghi file chi tiết dạng JSON (mảng) mô tả quyết định của Prompt 1, Prompt 2, Prompt 3 và lý do chốt đáp án; "
+             "có đối chiếu đáp án chuẩn nếu có --gold.",
+    )
+    parser.add_argument(
+        "--eval-json",
+        type=Path,
+        default=None,
+        help="Ghi báo cáo chấm điểm (đúng/sai/abstain, PA, theo từng kiểu) dạng JSON khi có --evaluate.",
+    )
+    parser.add_argument(
+        "--log-every",
+        type=int,
+        default=5,
+        help="In một dòng tiến độ sau mỗi N câu hoàn thành (mặc định 5).",
+    )
+    parser.add_argument(
         "--cache-root",
         type=Path,
         default=None,
@@ -482,6 +501,53 @@ def main() -> None:
         pred, details = _safe_answer(q_obj)
         return idx, pred, details
 
+    gold_map: Dict[str, Dict[str, Any]] = {}
+    if args.evaluate and args.gold and args.gold.exists():
+        gold_map = {g["id"]: g for g in load_jsonl(args.gold)}
+    tally = {"correct": 0, "wrong": 0, "abstain": 0}
+    n_new = len(to_run)
+
+    def _on_done(idx: int, pred: Dict[str, Any], details: Dict[str, Any]) -> None:
+        """Ghi kết quả một câu và in một dòng log (kèm điểm PA tạm thời khi có đáp án chuẩn)."""
+        nonlocal completed_count
+        results[idx] = pred
+        details_results[idx] = details
+        completed_count += 1
+        _record(idx)
+
+        done_new = completed_count - (len(questions) - n_new)
+        q_obj = questions[idx]
+        verdict = ""
+        if gold_map and q_obj["id"] in gold_map:
+            from evaluate import score_single_prediction
+
+            _, status = score_single_prediction(pred, gold_map[q_obj["id"]])
+            tally[status] += 1
+            verdict = {"correct": " ✔ĐÚNG", "wrong": " ✘SAI", "abstain": " ·bỏ qua"}[status]
+        if done_new == 1 or done_new % max(args.log_every, 1) == 0 or completed_count == len(questions):
+            elapsed = time.time() - start_time
+            avg_speed = elapsed / max(done_new, 1)
+            rem_mins = (n_new - done_new) * avg_speed / 60.0
+            ans_preview = json.dumps(pred.get("answer"), ensure_ascii=False) if "answer" in pred else str(pred.get("type"))
+            if len(ans_preview) > 35:
+                ans_preview = ans_preview[:32] + "..."
+            if details.get("is_consensus"):
+                status_tag = "ĐỒNG THUẬN"
+            elif pred.get("type") != "abstain":
+                status_tag = f"QUYẾT ĐỊNH ({details.get('decision_reason', '')})"
+            else:
+                status_tag = "ABSTAIN"
+            line = (
+                f"[{completed_count}/{len(questions)}] ({completed_count / len(questions) * 100:.1f}%) [{status_tag}] "
+                f"{q_obj['id']} ({q_obj['business_id']}) -> {pred.get('type')}: {ans_preview}{verdict} | "
+                f"{avg_speed:.2f}s/câu | ETA {rem_mins:.1f}m"
+            )
+            if gold_map:
+                n = sum(tally.values())
+                pa = (tally["correct"] - tally["wrong"]) / n * 100 if n else 0.0
+                line += f" | PA tạm {pa:.1f}% (đúng {tally['correct']}/sai {tally['wrong']}/bỏ qua {tally['abstain']})"
+            print(f"  {line}", flush=True)
+
     if to_run:
         if args.concurrency > 1 and len(to_run) > 1:
             with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
@@ -489,61 +555,11 @@ def main() -> None:
                 for fut in as_completed(futures):
                     idx, pred, details = fut.result()
                     with lock:
-                        results[idx] = pred
-                        details_results[idx] = details
-                        completed_count += 1
-                        _record(idx)
-
-                        elapsed = time.time() - start_time
-                        done_new = completed_count - (len(questions) - len(to_run))
-                        avg_speed = elapsed / max(done_new, 1)
-                        rem_secs = (len(to_run) - done_new) * avg_speed
-                        rem_mins = rem_secs / 60.0
-
-                        q_obj = questions[idx]
-                        qid = q_obj["id"]
-                        ans_preview = json.dumps(pred.get("answer"), ensure_ascii=False) if "answer" in pred else str(pred.get("type"))
-                        if len(ans_preview) > 35:
-                            ans_preview = ans_preview[:32] + "..."
-
-                        if details.get("is_consensus"):
-                            status_tag = "ĐỒNG THUẬN"
-                        elif pred.get("type") != "abstain":
-                            status_tag = f"FALLBACK ({details.get('decision_reason', 'adaptive')})"
-                        else:
-                            status_tag = "ABSTAIN"
-                        log_line = (
-                            f"[{completed_count}/{len(questions)}] ({completed_count/len(questions)*100:.1f}%) [{status_tag}] "
-                            f"{qid} ({q_obj['business_id']}) -> {pred.get('type')}: {ans_preview} | Tốc độ: {avg_speed:.2f}s/câu | ETA: {rem_mins:.1f}m"
-                        )
-                        if done_new == 1 or done_new % 3 == 0 or completed_count == len(questions):
-                            print(f"  {log_line}")
+                        _on_done(idx, pred, details)
         else:
             for idx, q_obj in to_run:
                 pred, details = _safe_answer(q_obj)
-                results[idx] = pred
-                details_results[idx] = details
-                completed_count += 1
-                _record(idx)
-
-                elapsed = time.time() - start_time
-                done_new = completed_count - (len(questions) - len(to_run))
-                avg_speed = elapsed / max(done_new, 1)
-                rem_secs = (len(to_run) - done_new) * avg_speed
-                rem_mins = rem_secs / 60.0
-
-                qid = q_obj["id"]
-                ans_preview = json.dumps(pred.get("answer"), ensure_ascii=False) if "answer" in pred else str(pred.get("type"))
-                if len(ans_preview) > 35:
-                    ans_preview = ans_preview[:32] + "..."
-
-                status_tag = "ĐỒNG THUẬN" if details.get("is_consensus") else "ABSTAIN"
-                log_line = (
-                    f"[{completed_count}/{len(questions)}] ({completed_count/len(questions)*100:.1f}%) [{status_tag}] "
-                    f"{qid} ({q_obj['business_id']}) -> {pred.get('type')}: {ans_preview} | Tốc độ: {avg_speed:.2f}s/câu | ETA: {rem_mins:.1f}m"
-                )
-                if done_new == 1 or done_new % 3 == 0 or completed_count == len(questions):
-                    print(f"  {log_line}")
+                _on_done(idx, pred, details)
 
     out_f.close()
     out_d.close()
@@ -557,10 +573,11 @@ def main() -> None:
         os.replace(tmp_path, path)
 
     predictions = [r for r in results if r is not None]
-    print(f"✅ Đã xuất kết quả dự đoán chính thức tại: {args.output}")
-    print(f"✅ Đã xuất bảng chi tiết đối chiếu 2 prompt tại: {details_path}")
+    print(f"✅ Đã xuất kết quả nộp bài (jsonl): {args.output}")
+    print(f"✅ Đã xuất log chi tiết (jsonl): {details_path}")
 
-    if args.evaluate and args.gold.exists():
+    report = None
+    if args.evaluate and args.gold and args.gold.exists():
         all_gold = load_jsonl(args.gold)
         q_ids = {q["id"] for q in questions}
         subset_gold = [g for g in all_gold if g["id"] in q_ids]
@@ -574,7 +591,24 @@ def main() -> None:
         print(f"Bỏ qua / Abstain (0)     : {report['abstain']}")
         print(f"Điểm ròng (Correct-Wrong): {report['raw_points']}")
         print(f"Penalized Accuracy (PA)  : {report['penalized_accuracy'] * 100:.2f}%")
+        print("-" * 60)
+        print("Theo kiểu đáp án (kiểu gốc | tổng | đúng | sai | bỏ qua | PA):")
+        for t_name, st in sorted(report["by_type"].items()):
+            t_pa = (st["correct"] - st["wrong"]) / st["total"] * 100 if st["total"] else 0.0
+            print(f"  {t_name:<13}| {st['total']:>5} | {st['correct']:>5} | {st['wrong']:>4} | {st['abstain']:>7} | {t_pa:6.1f}%")
         print("=" * 60)
+        if args.eval_json:
+            from src.report import write_json
+
+            write_json(args.eval_json, report)
+            print(f"✅ Đã xuất báo cáo chấm điểm: {args.eval_json}")
+
+    if args.detail_json:
+        from src.report import build_detail_records, write_json
+
+        records = build_detail_records(details_results, questions, predictions=results, gold_map=gold_map or None)
+        write_json(args.detail_json, records)
+        print(f"✅ Đã xuất file chi tiết quyết định (json): {args.detail_json}")
 
 
 if __name__ == "__main__":

@@ -45,7 +45,8 @@ Datamate/
 ├── .gitignore                # Bỏ qua dữ liệu lớn, cache, kết quả chạy
 ├── run_pipeline.py           # Điểm khởi chạy chính (đọc dữ liệu, chạy agent, ghi submission.jsonl)
 ├── evaluate.py               # Chấm điểm Penalized Accuracy
-├── colab_run.py              # Khởi động vLLM trên Colab rồi chạy run_pipeline cho một tập bất kỳ
+├── notebooks/
+│   └── zaloAI_colab.ipynb    # Notebook Colab: bật vLLM, chạy 300/3000 câu train và 1000 câu public test
 ├── rule.md                   # Quy tắc làm việc cho trợ lý lập trình (không thuộc pipeline)
 ├── MULTI_STAGE_AGENT_DESIGN.md  # Tài liệu thiết kế kiến trúc ban đầu
 ├── assets/                   # Tài nguyên dùng chung
@@ -395,11 +396,11 @@ Nguyên tắc: luật nghiệp vụ chỉ lấy từ rulebook đang dùng (mỗi
 42. **Từ điển lỗi gõ chép từ câu hỏi train** (`naof`, `cuwar`, `bani`, `quarr`...) và các cụm đặc thù trong bộ suy luận kiểu (`từng người nha`, `thang naof`, `ees`, `tuổi nợ`) đã bỏ; lỗi gõ để bước viết lại câu hỏi bằng LLM xử lý chung.
 43. **So khớp tên khi đồng thuận** dùng đúng chuẩn hoá của luật chấm (giữ dấu), bỏ từ điển "từ ngành hàng bỏ qua" (`bia`, `bột giặt`...) lấy từ tên hàng train.
 44. **Ingest**: bỏ danh sách tên bảng danh mục cứng (`DanhSachSanPham`, `BanHang_HangHoa`...) → nhận bảng danh mục theo cấu trúc; bỏ bảng `tra_hang`/cột `MaDon` → nhận bảng phiếu trả theo từ vựng trong tên bảng; bỏ regex gộp bảng tháng chỉ cho tên `BanHang_*` → gộp mọi bảng cùng cấu trúc chia theo kỳ/đợt; bỏ id shop (`biz_1xx`, `dev_0xx`) và tên file train trong comment/docstring.
-45. **`run_pipeline.py` không còn tự đổi `--data-root`** sang thư mục `*_preprocessed*` hay dò thư mục theo tiền tố id shop `dev_*`/`biz_*`. `tools/build_preprocessed_data.py` dùng chung hàm chuẩn hoá trạng thái của pipeline; `colab_run.py` (trước là `benchmark_colab_300.py`) chạy được cho mọi tập.
+45. **`run_pipeline.py` không còn tự đổi `--data-root`** sang thư mục `*_preprocessed*` hay dò thư mục theo tiền tố id shop `dev_*`/`biz_*`. `tools/build_preprocessed_data.py` dùng chung hàm chuẩn hoá trạng thái của pipeline; `notebooks/zaloAI_colab.ipynb` (trước là `benchmark_colab_300.py`) chạy được cho mọi tập.
 
 Còn giữ có chủ đích: giá trị mặc định của `RulebookKnobs` (thứ Hai, 23 tháng Chạp – mùng 10 tháng Giêng, ca 06:00–13:59) chỉ dùng khi rulebook không ghi; các danh sách từ vựng tiếng Việt chung (tên cột tiền/đơn vị/trạng thái, viết tắt nghiệp vụ); luật unanswerable theo từ khoá nhưng chỉ kích hoạt khi shop không có cột liên quan.
 
-**Chưa đo được**: thư mục không kèm dữ liệu train hay LLM, nên mức tăng PA thực tế cần đo lại bằng `python colab_run.py` trên GPU.
+**Chưa đo được**: thư mục không kèm dữ liệu train hay LLM, nên mức tăng PA thực tế cần đo lại bằng notebook `notebooks/zaloAI_colab.ipynb` trên GPU.
 
 ---
 
@@ -493,3 +494,27 @@ python run_pipeline.py \
 **Đối chiếu với nhánh đọc dữ liệu gốc (14 shop public, số dòng bảng bán hàng chính)**: giống hệt ở 12/14 shop (vd 90297, 84146, 75970, 119070, 22490, 10131). Hai shop khác nhau:
 - Shop có sổ bán hàng 18 sheet theo tháng: nhánh preprocessed ra 32914 dòng, nhánh đọc dữ liệu gốc chỉ 15382 (nguồn có 33493 dòng thô). **Nhánh đọc dữ liệu gốc đang mất hơn nửa dữ liệu ở shop này**: cột mã đơn tên "Đơn - Ma don" (tiêu đề nhóm cột có tiền tố "Đơn - ") không được nhận là cột mã đơn, nên sau khi ép kiểu số, các dòng tiếp theo của đơn (khách/mã đơn để trống theo luật fill-down) bị coi là dòng tổng và bị xoá. Lỗi này có từ bản gốc, chưa sửa (preprocessed không bị).
 - Một shop khác lệch 587 dòng giữa hai nhánh (153326 so với 152739), chưa tìm nguyên nhân.
+
+---
+
+## 18. Chạy trên Google Colab (`notebooks/zaloAI_colab.ipynb`)
+
+Dữ liệu trên Drive: `MyDrive/zaloAI/data/{train_preprocessed_full, public_test_preprocessed}`; kết quả lưu vào `MyDrive/zaloAI/ketqua/<tên lần chạy>/`.
+
+| Cell | Việc | Kết quả (Drive) |
+| :--- | :--- | :--- |
+| 1 | Mount Drive, `git pull` code, chép dữ liệu vào SSD (bỏ `.duckdb`, `samples/`), khai báo hàm `run_split` | — |
+| 2 | Bật vLLM (Qwen2.5-Coder-14B-AWQ, `--max-model-len 16384`, prefix caching) | — |
+| 3 | 300 câu train mẫu, có đối chiếu đáp án | `ketqua/train300/` |
+| 4 | 3000 câu train, có đối chiếu đáp án | `ketqua/train3000/` |
+| 5 | 1000 câu public test, không đối chiếu | `ketqua/public1000/` |
+| 6 | Xem log vLLM / GPU (tuỳ chọn) | — |
+| 7 | Tắt vLLM, tuỳ chọn ngắt runtime | — |
+
+Mỗi lần chạy sinh:
+- `submission.jsonl` — file nộp bài, mỗi dòng `{"id", "type", "answer"}` (định dạng của cuộc thi là JSON Lines);
+- `detail.json` — mảng JSON, mỗi câu mô tả quyết định của **Prompt 1** và **Prompt 2** (trạng thái, đáp án, mã đã sinh, kết quả chạy), Prompt 3 nếu có bỏ phiếu, lý do chốt đáp án bằng tiếng Việt (`decision_summary`), và với tập train có thêm `gold`, `verdict` (ĐÚNG/SAI/BỎ QUA) và `score`;
+- `evaluation.json` — (chỉ train) số đúng/sai/abstain, PA, thống kê theo kiểu đáp án, các câu sai mẫu;
+- `run.log` — toàn bộ log. Log hiển thị trực tiếp trong cell, mỗi 5 câu một dòng; với tập train có thêm điểm PA tạm thời (đúng/sai/bỏ qua) cập nhật liên tục, và cuối lần chạy in bảng kết quả theo từng kiểu đáp án cùng vài câu sai để xem nguyên nhân.
+
+Tham số mới của `run_pipeline.py` cho việc này: `--detail-json`, `--eval-json`, `--log-every`, `--cache-root`.

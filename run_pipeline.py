@@ -536,7 +536,7 @@ def main() -> None:
             elif pred.get("type") != "abstain":
                 status_tag = f"QUYẾT ĐỊNH ({details.get('decision_reason', '')})"
             else:
-                status_tag = "ABSTAIN"
+                status_tag = f"ABSTAIN ({details.get('decision_reason', '')})"
             line = (
                 f"[{completed_count}/{len(questions)}] ({completed_count / len(questions) * 100:.1f}%) [{status_tag}] "
                 f"{q_obj['id']} ({q_obj['business_id']}) -> {pred.get('type')}: {ans_preview}{verdict} | "

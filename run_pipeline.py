@@ -20,6 +20,7 @@ Ví dụ sử dụng:
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -50,14 +51,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--calendar",
         type=Path,
-        default=PROJECT_ROOT / "assets" / "calendar.csv" if (PROJECT_ROOT / "assets" / "calendar.csv").exists() else PROJECT_ROOT / "train" / "calendar.csv",
-        help="Đường dẫn tới file calendar.csv (mặc định ưu tiên assets/calendar.csv).",
+        default=None,
+        help="File calendar.csv. Mặc định tự tìm cạnh dữ liệu: <data-root>, thư mục cha của data-root, thư mục chứa file câu hỏi.",
     )
     parser.add_argument(
         "--rulebook",
         type=Path,
-        default=PROJECT_ROOT / "assets" / "rulebook.md" if (PROJECT_ROOT / "assets" / "rulebook.md").exists() else PROJECT_ROOT / "train" / "rulebook.md",
-        help="Đường dẫn tới file rulebook.md (mặc định ưu tiên assets/rulebook.md).",
+        default=None,
+        help="File rulebook.md của TẬP đang chạy. Mặc định tự tìm cạnh dữ liệu (như --calendar). "
+             "Không tìm thấy thì dừng báo lỗi, trừ khi bật --allow-default-rulebook.",
+    )
+    parser.add_argument(
+        "--allow-default-rulebook",
+        action="store_true",
+        help="Cho phép dùng assets/rulebook.md (rulebook bộ train) khi không tìm thấy rulebook của tập. Chỉ dùng khi thử nghiệm.",
     )
     parser.add_argument(
         "--output",
@@ -121,8 +128,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=3,
-        help="Số lượng câu hỏi xử lý song song trên GPU continuous batching (mặc định: 3).",
+        default=4,
+        help="Số câu hỏi xử lý song song (mỗi câu gửi 2 request P1/P2 cùng lúc -> 8 sequence đồng thời, vừa KV cache "
+             "của 14B-AWQ trên GPU ~22GB nhờ system prompt dùng chung được prefix-cache). Mặc định: 4.",
     )
     parser.add_argument(
         "--gold",
@@ -141,13 +149,40 @@ def parse_args() -> argparse.Namespace:
         "--arbitration",
         type=str,
         default="strict",
-        choices=["strict", "adaptive"],
-        help="Chính sách trọng tài: 'strict' (an toàn tối đa, yêu cầu đồng thuận tuyệt đối, Safe Abstain khi bất đồng), hoặc 'adaptive' (cho phép fallback P1 khi P2 lỗi runtime).",
+        choices=["strict", "adaptive", "tournament"],
+        help="Chính sách trọng tài: 'strict' (an toàn tối đa, yêu cầu đồng thuận tuyệt đối, Safe Abstain khi bất đồng), 'adaptive' (cho phép fallback P1 khi P2 lỗi runtime), hoặc 'tournament' (thêm trọng tài LLM khi hai số bất đồng).",
+    )
+    parser.add_argument(
+        "--rewrite-question",
+        action="store_true",
+        help="Bật bước viết lại câu hỏi bằng LLM (DART-SQL) trước khi sinh code. Tốn thêm một lượt LLM tuần tự mỗi câu; mặc định tắt.",
+    )
+    parser.add_argument(
+        "--cache-root",
+        type=Path,
+        default=None,
+        help="Thư mục ghi cache Parquet của dữ liệu đã nạp (mặc định: .cache/ingested cạnh thư mục tập). Nên đặt ở nơi có quyền ghi.",
+    )
+    parser.add_argument(
+        "--ingest-workers",
+        type=int,
+        default=4,
+        help="Số tiến trình nạp dữ liệu song song cho các shop chưa có cache (mặc định 4; 1 = tuần tự).",
+    )
+    parser.add_argument(
+        "--no-tiebreak",
+        action="store_true",
+        help="Tắt lá phiếu thứ ba (Prompt 3) khi P1/P2 bất đồng; mặc định bật và chỉ nhận đáp án có >= 2/3 phiếu.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Tái sử dụng các đáp án không-abstain trong file output cũ (chỉ dùng khi tiếp tục một lần chạy bị ngắt CÙNG phiên bản code).",
     )
     parser.add_argument(
         "--fresh",
         action="store_true",
-        help="Chạy mới toàn bộ câu hỏi, không tái sử dụng cache từ file output cũ.",
+        help="(Giữ để tương thích) Chạy mới toàn bộ câu hỏi; đây đã là mặc định nếu không có --resume.",
     )
     parser.add_argument(
         "--seed",
@@ -164,12 +199,91 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _ingest_worker(data_root: str, cache_root: str, business_id: str) -> str:
+    """Chạy trong tiến trình con: nạp một shop và ghi Parquet cache (tiến trình chính đọc lại từ cache)."""
+    from src.ingest import BusinessDataStore
+
+    BusinessDataStore(data_root=Path(data_root), cache_root=Path(cache_root)).load_tables(business_id, use_cache=True)
+    return business_id
+
+
+def _parallel_ingest(store: Any, biz_ids: List[str], workers: int) -> None:
+    """
+    Làm sạch/nạp lần đầu mỗi shop tốn 1-60 giây (CPU). Chạy các shop chưa có cache song song bằng nhiều tiến trình,
+    ghi Parquet cache; vòng nạp tuần tự phía sau chỉ còn đọc cache. Lỗi ở tiến trình con không ảnh hưởng: tiến trình
+    chính tự nạp lại như cũ.
+    """
+    cache_root = getattr(store, "cache_root", None)
+    if cache_root is None:
+        return
+    pending = [b for b in biz_ids if not (cache_root / b / "_manifest.json").exists()]
+    workers = min(workers, len(pending), os.cpu_count() or 1)
+    if workers <= 1:
+        return
+    print(f"⚙️ Nạp song song {len(pending)} shop chưa có cache bằng {workers} tiến trình...", flush=True)
+    from concurrent.futures import ProcessPoolExecutor
+
+    try:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futs = [pool.submit(_ingest_worker, str(store.data_root), str(store.cache_root), b) for b in pending]
+            for f in futs:
+                try:
+                    f.result()
+                except Exception as exc:  # noqa: BLE001
+                    print(f"   ⚠️ nạp song song lỗi ({type(exc).__name__}), sẽ nạp tuần tự: {exc}", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️ Không chạy được nạp song song: {exc}", flush=True)
+
+
+def resolve_split_files(
+    data_root: Path,
+    questions: Path,
+    rulebook: Optional[Path] = None,
+    calendar: Optional[Path] = None,
+    allow_default_rulebook: bool = False,
+) -> Tuple[Path, Path]:
+    """
+    Rulebook và lịch âm dương là của TỪNG TẬP (split). Thứ tự tìm: đường dẫn chỉ định -> data_root ->
+    thư mục cha của data_root -> thư mục chứa file câu hỏi. Rulebook không tìm thấy thì dừng báo lỗi
+    (trừ khi allow_default_rulebook); calendar không thấy thì dùng assets/calendar.csv (lịch giống nhau giữa các tập).
+    """
+    def _find(name: str, explicit: Optional[Path]) -> Optional[Path]:
+        if explicit is not None:
+            if explicit.exists():
+                return explicit
+            raise SystemExit(f"❌ Không tìm thấy {name} được chỉ định: {explicit}")
+        for base in (data_root, data_root.parent, questions.parent):
+            cand = base / name
+            if cand.exists():
+                return cand
+        return None
+
+    found_rb = _find("rulebook.md", rulebook)
+    if found_rb is None:
+        default_rb = PROJECT_ROOT / "assets" / "rulebook.md"
+        if not (allow_default_rulebook and default_rb.exists()):
+            raise SystemExit(
+                "❌ Không tìm thấy rulebook.md của tập dữ liệu (đã tìm trong data-root, thư mục cha và thư mục file câu hỏi). "
+                "Hãy truyền --rulebook, hoặc dùng --allow-default-rulebook để dùng bản train (chỉ khi thử nghiệm)."
+            )
+        print("⚠️ CẢNH BÁO: dùng assets/rulebook.md (rulebook bộ train), KHÔNG phải rulebook của tập đang chạy!", flush=True)
+        found_rb = default_rb
+
+    found_cal = _find("calendar.csv", calendar)
+    if found_cal is None:
+        default_cal = PROJECT_ROOT / "assets" / "calendar.csv"
+        if not default_cal.exists():
+            raise SystemExit("❌ Không tìm thấy calendar.csv (data-root, thư mục cha, thư mục file câu hỏi hoặc assets/).")
+        print("⚠️ Không thấy calendar.csv cạnh dữ liệu, dùng assets/calendar.csv", flush=True)
+        found_cal = default_cal
+    return found_rb, found_cal
+
+
 def main() -> None:
     import random
     import numpy as np
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    import shutil
 
     args = parse_args()
 
@@ -184,37 +298,12 @@ def main() -> None:
     except ImportError:
         pass
 
-    # Tự động sửa lỗi typo đường dẫn nếu người dùng truyền nhầm .../data nhưng shop nằm ở thư mục cha
+    # Sửa lỗi đường dẫn thừa '/data': chỉ khi thư mục cha chứa các thư mục shop (có README.md), không dò theo tiền tố id shop.
+    # Không tự đổi --data-root sang thư mục "preprocessed" nào: luôn chạy trên đúng dữ liệu được chỉ định.
     if not args.data_root.exists() and args.data_root.name == "data" and args.data_root.parent.exists():
-        if any(args.data_root.parent.glob("dev_*")) or any(args.data_root.parent.glob("biz_*")):
-            print(f"ℹ️ [Path Correction] Phát hiện đường dẫn thừa '/data', tự động trỏ về: {args.data_root.parent}")
+        if any((d / "README.md").exists() for d in args.data_root.parent.iterdir() if d.is_dir()):
+            print(f"ℹ️ [Path Correction] Không có '{args.data_root}', dùng thư mục cha: {args.data_root.parent}")
             args.data_root = args.data_root.parent
-
-    # Tự động ưu tiên thư mục preprocessed nội bộ nếu có
-    is_public_test = "public" in str(args.questions).lower() or "dev" in str(args.data_root).lower()
-    if is_public_test:
-        if str(args.data_root).rstrip("/\\").endswith("public_test/data") or not args.data_root.exists():
-            candidate_public_preprocessed = [
-                PROJECT_ROOT / "public_test_preprocessed",
-                Path.cwd() / "public_test_preprocessed",
-            ]
-            for candidate in candidate_public_preprocessed:
-                if candidate.exists() and candidate.is_dir() and any(candidate.glob("dev_*")):
-                    print(f"🚀 [Auto-Detect] Tự động phát hiện dữ liệu public_test tiền xử lý tối ưu tại: {candidate}")
-                    args.data_root = candidate
-                    break
-    elif str(args.data_root).rstrip("/\\").endswith("train/data") or not args.data_root.exists():
-        candidate_preprocessed = [
-            PROJECT_ROOT / "train_preprocessed_full",
-            PROJECT_ROOT / "train_preprocessed",
-            Path.cwd() / "train_preprocessed_full",
-            Path.cwd() / "train_preprocessed",
-        ]
-        for candidate in candidate_preprocessed:
-            if candidate.exists() and candidate.is_dir() and any(candidate.glob("biz_*")):
-                print(f"🚀 [Auto-Detect] Tự động phát hiện dữ liệu tiền xử lý tối ưu tại: {candidate}")
-                args.data_root = candidate
-                break
 
     # Tự động định vị file questions nếu đường dẫn tương đối không nằm tại cwd
     if not args.questions.exists():
@@ -230,22 +319,16 @@ def main() -> None:
         elif (PROJECT_ROOT / args.gold.name).exists():
             args.gold = PROJECT_ROOT / args.gold.name
 
-    # Tự động định vị calendar và rulebook
-    if not args.calendar.exists():
-        if (PROJECT_ROOT / args.calendar).exists():
-            args.calendar = PROJECT_ROOT / args.calendar
-        elif (PROJECT_ROOT / "assets" / "calendar.csv").exists():
-            args.calendar = PROJECT_ROOT / "assets" / "calendar.csv"
-        elif (PROJECT_ROOT / "train" / "calendar.csv").exists():
-            args.calendar = PROJECT_ROOT / "train" / "calendar.csv"
-
-    if not args.rulebook.exists():
-        if (PROJECT_ROOT / args.rulebook).exists():
-            args.rulebook = PROJECT_ROOT / args.rulebook
-        elif (PROJECT_ROOT / "assets" / "rulebook.md").exists():
-            args.rulebook = PROJECT_ROOT / "assets" / "rulebook.md"
-        elif (PROJECT_ROOT / "train" / "rulebook.md").exists():
-            args.rulebook = PROJECT_ROOT / "train" / "rulebook.md"
+    args.rulebook, args.calendar = resolve_split_files(
+        data_root=args.data_root,
+        questions=args.questions,
+        rulebook=args.rulebook,
+        calendar=args.calendar,
+        allow_default_rulebook=args.allow_default_rulebook,
+    )
+    _rb_title = args.rulebook.read_text(encoding="utf-8").splitlines()[0] if args.rulebook.stat().st_size else ""
+    print(f"📘 Rulebook: {args.rulebook} | {_rb_title}", flush=True)
+    print(f"📅 Calendar: {args.calendar}", flush=True)
 
     questions = load_jsonl(args.questions)
     if args.limit and args.limit > 0:
@@ -287,19 +370,21 @@ def main() -> None:
         verbose=args.verbose,
         consensus_mode=args.consensus_mode,
         arbitration_strategy=args.arbitration,
+        cache_root=args.cache_root,
         seed=args.seed,
+        tiebreak=not args.no_tiebreak,
+        rewrite_question=args.rewrite_question,
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
     details_path = args.details_output or args.output.with_name(args.output.stem + "_details.jsonl")
-    tmp_output = args.output.with_suffix(".jsonl.tmp")
-    tmp_details = details_path.with_suffix(".jsonl.tmp")
 
     # Nạp các câu trả lời tốt đã có từ trước (không phải abstain) nếu không bật cờ --fresh
     existing_cache: Dict[str, Dict[str, Any]] = {}
     existing_details: Dict[str, Dict[str, Any]] = {}
-    if not args.fresh and args.output.exists():
+    reuse_previous = args.resume and not args.fresh
+    if reuse_previous and args.output.exists():
         for ln in args.output.read_text(encoding="utf-8").splitlines():
             if ln.strip():
                 try:
@@ -308,7 +393,7 @@ def main() -> None:
                         existing_cache[item["id"]] = item
                 except Exception:
                     pass
-    if not args.fresh and details_path.exists():
+    if reuse_previous and details_path.exists():
         for ln in details_path.read_text(encoding="utf-8").splitlines():
             if ln.strip():
                 try:
@@ -324,6 +409,7 @@ def main() -> None:
     biz_ids = sorted(list({q["business_id"] for q in questions}))
     print(f"Kiểm tra và nạp sẵn dữ liệu cho {len(biz_ids)} doanh nghiệp...")
     t_prewarm = time.time()
+    _parallel_ingest(agent.store, biz_ids, args.ingest_workers)
     for idx, bid in enumerate(biz_ids, 1):
         t0 = time.time()
         agent.store.load_tables(bid, use_cache=True)
@@ -353,21 +439,47 @@ def main() -> None:
     lock = threading.Lock()
     start_time = time.time()
 
-    def _flush_tmp() -> None:
-        with tmp_output.open("w", encoding="utf-8") as out_f:
-            for r in results:
-                if r is not None:
-                    out_f.write(json.dumps(r, ensure_ascii=False) + "\n")
-        with tmp_details.open("w", encoding="utf-8") as out_d:
-            for d in details_results:
-                if d is not None:
-                    out_d.write(json.dumps(d, ensure_ascii=False) + "\n")
+    # Ghi NGAY từng câu vào file đích (chế độ append + flush + fsync): nếu lượt chạy bị dừng giữa chừng
+    # (hết giờ, bị kill), mọi câu đã xong vẫn nằm trong file nộp; câu chưa xong tính là abstain.
+    out_f = args.output.open("w", encoding="utf-8")
+    out_d = details_path.open("w", encoding="utf-8")
 
-    _flush_tmp()
+    def _write_line(fh: Any, obj: Dict[str, Any]) -> None:
+        fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        fh.flush()
+        try:
+            os.fsync(fh.fileno())
+        except OSError:
+            pass
+
+    def _record(idx: int) -> None:
+        if results[idx] is not None:
+            _write_line(out_f, results[idx])
+        if details_results[idx] is not None:
+            _write_line(out_d, details_results[idx])
+
+    for _i in range(len(questions)):
+        _record(_i)
+
+    def _safe_answer(q_obj: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Một câu lỗi bất ngờ chỉ được abstain (0 điểm), không được làm sập cả lượt chạy."""
+        try:
+            return agent.answer_question_dual(q_obj)
+        except Exception as exc:
+            print(f"    ⚠️ [Unhandled] {q_obj.get('id')}: {type(exc).__name__}: {exc}", flush=True)
+            return {"id": q_obj["id"], "type": "abstain"}, {
+                "id": q_obj["id"],
+                "business_id": q_obj.get("business_id"),
+                "error": f"{type(exc).__name__}: {exc}",
+                "is_consensus": False,
+                "decision_reason": "unhandled_exception",
+                "final_decision": "abstain",
+                "final_answer": None,
+            }
 
     def _solve_item(item: Tuple[int, Dict[str, Any]]) -> Tuple[int, Dict[str, Any], Dict[str, Any]]:
         idx, q_obj = item
-        pred, details = agent.answer_question_dual(q_obj)
+        pred, details = _safe_answer(q_obj)
         return idx, pred, details
 
     if to_run:
@@ -380,7 +492,7 @@ def main() -> None:
                         results[idx] = pred
                         details_results[idx] = details
                         completed_count += 1
-                        _flush_tmp()
+                        _record(idx)
 
                         elapsed = time.time() - start_time
                         done_new = completed_count - (len(questions) - len(to_run))
@@ -408,11 +520,11 @@ def main() -> None:
                             print(f"  {log_line}")
         else:
             for idx, q_obj in to_run:
-                pred, details = agent.answer_question_dual(q_obj)
+                pred, details = _safe_answer(q_obj)
                 results[idx] = pred
                 details_results[idx] = details
                 completed_count += 1
-                _flush_tmp()
+                _record(idx)
 
                 elapsed = time.time() - start_time
                 done_new = completed_count - (len(questions) - len(to_run))
@@ -433,9 +545,16 @@ def main() -> None:
                 if done_new == 1 or done_new % 3 == 0 or completed_count == len(questions):
                     print(f"  {log_line}")
 
-    # Đổi tên file tạm thành file chính thức an toàn
-    shutil.move(str(tmp_output), str(args.output))
-    shutil.move(str(tmp_details), str(details_path))
+    out_f.close()
+    out_d.close()
+    # Ghi lại theo đúng thứ tự file câu hỏi, thay thế nguyên tử (không bao giờ để file nộp ở trạng thái dở dang)
+    for path, rows in ((args.output, results), (details_path, details_results)):
+        tmp_path = path.with_name(path.name + ".tmp")
+        with tmp_path.open("w", encoding="utf-8") as fh:
+            for r in rows:
+                if r is not None:
+                    fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+        os.replace(tmp_path, path)
 
     predictions = [r for r in results if r is not None]
     print(f"✅ Đã xuất kết quả dự đoán chính thức tại: {args.output}")

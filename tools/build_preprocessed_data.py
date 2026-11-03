@@ -6,7 +6,7 @@ Khắc phục 100% lỗi cắt cụt 3.25 MB:
 - Chuẩn hóa ngày tháng ISO YYYY-MM-DD.
 - Chuẩn hóa trạng thái status_norm ('Hoàn thành', 'Đã hủy', 'Trả hàng', 'Đang giao').
 - Tự động tính toán cột quy đổi đơn vị cơ bản (qty_base).
-- Denormalize cho các shop quan hệ (biz_111, biz_123, biz_127, biz_129).
+- Denormalize cho các shop dữ liệu quan hệ (nhiều bảng nối bằng mã).
 - Tạo file DuckDB hoàn chỉnh không bị hỏng footer cho từng shop.
 - Tạo _columns.csv, _build.csv, samples/ và report.csv chuẩn xác.
 """
@@ -30,7 +30,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.ingest import BusinessDataStore, to_nfc
+from src.ingest import BusinessDataStore, normalize_order_status, to_nfc
 
 
 def parse_readme_conversions(readme_text: str) -> Dict[Tuple[str, str], float]:
@@ -56,18 +56,12 @@ def parse_readme_conversions(readme_text: str) -> Dict[Tuple[str, str], float]:
     return conv_map
 
 
-def normalize_status_string(val: Any) -> str:
-    """Chuẩn hóa trạng thái đơn hàng về 4 giá trị chuẩn."""
+def normalize_status_string(val: Any) -> Any:
+    """Chuẩn hóa trạng thái đơn hàng bằng đúng hàm của pipeline (src.ingest.normalize_order_status).
+    Ô trống giữ trống (không tự coi là 'Hoàn thành'); "Đã trả" (đã trả tiền) không phải trả hàng."""
     if val is None or pd.isna(val):
-        return "Hoàn thành"
-    s = to_nfc(str(val)).strip().lower()
-    if any(k in s for k in ["hủy", "huỷ", "cancel"]):
-        return "Đã hủy"
-    if any(k in s for k in ["trả", "tra", "return", "đổi trả", "hoàn hàng", "hoàn trả"]):
-        return "Trả hàng"
-    if any(k in s for k in ["đang giao", "chờ", "pending", "đang xử lý", "đang giao dịch"]):
-        return "Đang giao"
-    return "Hoàn thành"
+        return val
+    return normalize_order_status(to_nfc(str(val)))
 
 
 def infer_column_kind(series: pd.Series) -> str:

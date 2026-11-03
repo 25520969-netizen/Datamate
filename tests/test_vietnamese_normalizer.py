@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Unit tests cho Module 1: Vietnamese Context-Aware Canonicalizer.
-Kiểm tra chuẩn hoá Telex, từ viết tắt và Bảo vệ Thực thể (Entity Preservation).
+Kiểm tra chuẩn hoá Unicode, từ viết tắt và Bảo vệ Thực thể (Entity Preservation).
 """
 
 import pandas as pd
@@ -16,16 +16,15 @@ def test_unicode_nfc_normalization():
     assert to_nfc(nfd_str) == nfc_str
 
 
-def test_telex_typo_correction():
-    q = "naof thangs cuwar nhaf duocj bani tieenf cuoois cuar nhoms laf hown trar hees ngayf nhaats"
-    cleaned = VietnameseNormalizer.clean_deterministic(q)
-    expected_words = ["nào", "tháng", "cửa", "nhà", "được", "bán", "tiền", "cuối", "của", "nhóm", "là", "hơn", "trả", "hết", "ngày", "nhất"]
-    for w in expected_words:
-        assert w in cleaned
+def test_no_hardcoded_typo_list():
+    # Không còn danh sách lỗi gõ chép từ câu hỏi train: tầng tất định không tự "đoán" lỗi gõ,
+    # để bước viết lại bằng LLM xử lý chung; tên thương hiệu không dấu không bị biến đổi.
+    q = "naof thangs Tiger Box Max"
+    assert VietnameseNormalizer.clean_deterministic(q) == q
 
 
 def test_business_abbreviations_expansion():
-    q = "tháng 5 dt cua shop dc bnhiu, kh mua mấy sp có hsd đến tháng 6"
+    q = "tháng 5 dthu cua shop dc bnhiu, kh mua mấy sp có hsd đến tháng 6"
     cleaned = VietnameseNormalizer.clean_deterministic(q)
     assert "doanh thu" in cleaned
     assert "được" in cleaned
@@ -80,15 +79,6 @@ def test_additional_business_abbreviations():
     assert "số lượng" in cleaned
     assert "chiết khấu" in cleaned
     assert "được" in cleaned
-
-
-def test_telex_complex_words():
-    # Sửa lỗi gõ Telex phổ biến
-    text = "cuwar hangf banf nhieefu quarr ngon"
-    cleaned = VietnameseNormalizer.clean_deterministic(text)
-    assert "cửa hàng" in cleaned
-    assert "nhiều" in cleaned
-    assert "quả" in cleaned
 
 
 def test_entity_preservation_alphanumeric_codes_and_hyphens():

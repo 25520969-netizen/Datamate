@@ -1,0 +1,793 @@
+{
+ "_meta": {
+  "description": "Từ điển ngôn ngữ-dữ liệu của DataMate: đọc hiểu câu hỏi (viết tắt/tiếng lóng), nối cách nói với giá trị mã hoá trong dữ liệu, biến thể trạng thái đơn, tên cột theo vai trò, chủ đề 'dữ liệu không có thông tin này'.",
+  "built_from": "train",
+  "policy": "Chỉ học từ bộ train (có answers.jsonl). Không dùng public_test/private_test. Mọi mục có 'evidence' = số câu/shop trong train hỗ trợ (tools/mine_lexicon.py)."
+ },
+ "query_abbreviations": {
+  "always": {
+   "dthu": "doanh thu",
+   "sp": "sản phẩm",
+   "kh": "khách hàng",
+   "ncc": "nhà cung cấp",
+   "hsd": "hạn sử dụng",
+   "nsx": "ngày sản xuất",
+   "đvt": "đơn vị tính",
+   "dvt": "đơn vị tính",
+   "sl": "số lượng",
+   "sluong": "số lượng",
+   "nv": "nhân viên",
+   "gd": "giao dịch",
+   "hd": "hóa đơn",
+   "hđ": "hóa đơn",
+   "bn": "bao nhiêu",
+   "bnhiu": "bao nhiêu",
+   "bnhieu": "bao nhiêu",
+   "bao nhiu": "bao nhiêu",
+   "đc": "được",
+   "dc": "được",
+   "nhìu": "nhiều",
+   "nhiu": "nhiều",
+   "hnay": "hôm nay",
+   "hqua": "hôm qua",
+   "trc": "trước",
+   "vs": "so với",
+   "ko": "không",
+   "hok": "không",
+   "hông": "không",
+   "j": "gì",
+   "gium": "giúp",
+   "giùm": "giúp",
+   "revenue": "doanh thu",
+   "total": "tổng",
+   "bill": "đơn",
+   "so vs": "so với",
+   "ct": "chứng từ"
+  },
+  "contextual": [
+   {
+    "token": "th",
+    "next": [
+     "trước",
+     "trc",
+     "này",
+     "nay",
+     "rồi",
+     "roi",
+     "sau"
+    ],
+    "to": "tháng"
+   },
+   {
+    "token": "k",
+    "next": [
+     "hả",
+     "ha",
+     "kê",
+     "ke",
+     "ai",
+     "có",
+     "co"
+    ],
+    "to": "không"
+   },
+   {
+    "token": "tm",
+    "prev": [
+     "bằng",
+     "bang",
+     "qua",
+     "trả",
+     "tra",
+     "thanh toán"
+    ],
+    "to": "tiền mặt"
+   },
+   {
+    "token": "ck",
+    "prev": [
+     "bằng",
+     "bang",
+     "qua",
+     "trả",
+     "tra",
+     "thanh toán"
+    ],
+    "to": "chuyển khoản"
+   },
+   {
+    "token": "ck",
+    "prev": [
+     "mức",
+     "giảm",
+     "được hưởng"
+    ],
+    "to": "chiết khấu"
+   },
+   {
+    "token": "ck",
+    "next": [
+     "%"
+    ],
+    "to": "chiết khấu"
+   },
+   {
+    "token": "nhiu",
+    "prev": [
+     "bao"
+    ],
+    "to": "nhiêu"
+   }
+  ],
+  "protect_when_followed_by_digit": [
+   "dc",
+   "đc",
+   "hd",
+   "hđ",
+   "ct"
+  ]
+ },
+ "value_concepts": {
+  "payment_cash": {
+   "phrases": [
+    "tiền mặt",
+    "tm",
+    "trả cash"
+   ],
+   "values": [
+    "cash",
+    "tiền mặt",
+    "tien mat",
+    "tm"
+   ]
+  },
+  "payment_transfer": {
+   "phrases": [
+    "chuyển khoản",
+    "ck",
+    "banking",
+    "chuyển tiền"
+   ],
+   "values": [
+    "transfer",
+    "chuyển khoản",
+    "chuyen khoan",
+    "ck",
+    "bank"
+   ]
+  },
+  "payment_ewallet": {
+   "phrases": [
+    "ví điện tử",
+    "ví momo",
+    "momo",
+    "zalopay"
+   ],
+   "values": [
+    "ewallet",
+    "e-wallet",
+    "ví điện tử",
+    "vi dien tu",
+    "momo",
+    "zalopay"
+   ]
+  },
+  "payment_cod": {
+   "phrases": [
+    "cod",
+    "thu hộ",
+    "ship cod"
+   ],
+   "values": [
+    "cod",
+    "thu hộ (cod)",
+    "thu ho",
+    "ship cod"
+   ]
+  },
+  "payment_debt": {
+   "phrases": [
+    "ghi nợ",
+    "mua chịu",
+    "trả sau"
+   ],
+   "values": [
+    "debt",
+    "ghi nợ",
+    "ghi no",
+    "mua chịu"
+   ]
+  },
+  "channel_store": {
+   "phrases": [
+    "tại quầy",
+    "tại cửa hàng",
+    "tại tiệm",
+    "mua trực tiếp",
+    "bán trực tiếp",
+    "tại chỗ"
+   ],
+   "values": [
+    "store",
+    "tại quầy",
+    "tại cửa hàng",
+    "offline",
+    "trực tiếp"
+   ]
+  },
+  "channel_zalo": {
+   "phrases": [
+    "zalo oa",
+    "zalo",
+    "qua zalo"
+   ],
+   "values": [
+    "zalo_oa",
+    "zalo oa",
+    "zalo"
+   ]
+  },
+  "channel_phone": {
+   "phrases": [
+    "điện thoại",
+    "qua điện thoại",
+    "gọi điện",
+    "đặt qua điện thoại"
+   ],
+   "values": [
+    "phone",
+    "điện thoại",
+    "dien thoai",
+    "hotline"
+   ]
+  }
+ },
+ "status_variants": {
+  "Hoàn thành": [
+   "hoàn thành",
+   "đã hoàn thành",
+   "hoàn tất",
+   "thành công",
+   "xong",
+   "đã xong",
+   "đã lấy",
+   "đã giao",
+   "ok",
+   "completed",
+   "delivered",
+   "giao thành công"
+  ],
+  "Đã hủy": [
+   "đã hủy",
+   "đã huỷ",
+   "hủy",
+   "huỷ",
+   "hủy đơn",
+   "huỷ đơn",
+   "đã hủy đơn",
+   "khách hủy",
+   "khách huỷ",
+   "không giao được",
+   "cancel",
+   "cancelled",
+   "canceled"
+  ],
+  "Trả hàng": [
+   "trả hàng",
+   "đã trả hàng",
+   "đã hoàn hàng",
+   "hoàn hàng",
+   "hoàn trả",
+   "đổi trả",
+   "trả lại",
+   "hàng trả về",
+   "khách trả",
+   "returned",
+   "return"
+  ],
+  "Đang giao": [
+   "đang giao",
+   "đang giao hàng",
+   "đang vận chuyển",
+   "đang ship",
+   "chờ giao",
+   "đang gửi",
+   "đang xử lý",
+   "shipping",
+   "pending"
+  ]
+ },
+ "column_roles": {
+  "product_name": [
+   "Hàng hóa",
+   "Hàng",
+   "Product",
+   "Nội dung",
+   "Tên SP",
+   "Tên hàng hóa",
+   "Tên mặt hàng",
+   "Mặt hàng",
+   "Món"
+  ],
+  "customer_name": [
+   "Tên khách",
+   "Tên KH",
+   "Tên khách hàng",
+   "Khách hàng",
+   "Bên mua",
+   "Đối tác"
+  ],
+  "order_id": [
+   "Mã GD",
+   "Mã bill",
+   "Mã phiếu",
+   "Số phiếu",
+   "Mã chứng từ",
+   "Mã hóa đơn",
+   "Mã đơn hàng",
+   "Mã đơn",
+   "Order ID"
+  ],
+  "date": [
+   "Ngày tháng",
+   "Ngày bán",
+   "Ngày tạo",
+   "Thời gian tạo",
+   "Ngày lập",
+   "Ngày đặt hàng",
+   "Ngày"
+  ],
+  "quantity": [
+   "Số lượng sản phẩm",
+   "SL bán",
+   "SL",
+   "Slg",
+   "Số lượng"
+  ],
+  "amount": [
+   "Thanh tien",
+   "Thành tiền",
+   "Giá trị",
+   "Tiền",
+   "Tổng tiền hàng"
+  ],
+  "status": [
+   "Trạng thái đơn hàng",
+   "Trạng thái xử lý",
+   "Tình trạng đơn",
+   "Trạng thái",
+   "Tình trạng"
+  ],
+  "category": [
+   "Nhóm hàng",
+   "Nhom hang",
+   "Nhóm hàng hóa",
+   "Loại sản phẩm",
+   "Loại hàng hóa",
+   "Danh mục"
+  ]
+ },
+ "unanswerable_topics": [
+  {
+   "keywords": [
+    "thái độ",
+    "tận tâm",
+    "tận tình",
+    "nhiệt tình",
+    "thân thiện",
+    "vui vẻ",
+    "dễ thương",
+    "tốt bụng",
+    "lễ phép",
+    "lịch sự",
+    "chu đáo",
+    "tay nghề",
+    "lành nghề",
+    "khéo tay",
+    "mấy sao",
+    "đánh giá sao",
+    "chất lượng dịch vụ",
+    "hài lòng",
+    "hay khen",
+    "được khen",
+    "hay chê",
+    "phàn nàn",
+    "quý mến",
+    "yêu mến",
+    "được lòng",
+    "đẹp trai",
+    "xinh gái"
+   ],
+   "data_keys": [
+    "đánh giá",
+    "danh_gia",
+    "rating",
+    "nhận xét",
+    "feedback",
+    "review",
+    "số sao",
+    "khen",
+    "hài lòng",
+    "phản hồi",
+    "khảo sát"
+   ],
+   "reason": "Dữ liệu shop không có cột đánh giá cảm tính, thái độ hoặc chất lượng dịch vụ."
+  },
+  {
+   "keywords": [
+    "uống mỗi lần",
+    "liều dùng",
+    "cách dùng",
+    "uống bao nhiêu viên",
+    "uống mấy gói",
+    "tác dụng phụ",
+    "chống chỉ định",
+    "dị ứng",
+    "tương tác thuốc",
+    "phụ nữ có thai",
+    "bà bầu dùng",
+    "trẻ em dùng được",
+    "công dụng",
+    "trị bệnh",
+    "chữa bệnh",
+    "uống lúc nào",
+    "uống trước hay sau"
+   ],
+   "data_keys": [
+    "tác dụng phụ",
+    "chống chỉ định",
+    "liều",
+    "cách dùng",
+    "hướng dẫn",
+    "công dụng",
+    "chỉ định",
+    "tac_dung_phu",
+    "chong_chi_dinh"
+   ],
+   "reason": "Liều dùng, tác dụng phụ, chống chỉ định hay công dụng y tế là kiến thức bên ngoài, không ghi trong dữ liệu."
+  },
+  {
+   "keywords": [
+    "lý do hủy",
+    "lý do huỷ",
+    "lí do hủy",
+    "lí do huỷ",
+    "lý do trả hàng",
+    "lý do đổi",
+    "vì sao hủy",
+    "vì sao huỷ",
+    "tại sao hủy",
+    "tại sao huỷ",
+    "vì giao trễ",
+    "vì giao chậm",
+    "nguyên nhân hủy",
+    "nguyên nhân huỷ",
+    "vì sao khách trả",
+    "tại sao khách trả"
+   ],
+   "data_keys": [
+    "lý do",
+    "lí do",
+    "nguyên nhân",
+    "ly_do",
+    "reason",
+    "ghi chú",
+    "ghi chu",
+    "note"
+   ],
+   "reason": "Shop không có cột ghi nhận lý do hủy/trả đơn hàng."
+  },
+  {
+   "keywords": [
+    "tuổi của khách",
+    "khách bao nhiêu tuổi",
+    "độ tuổi",
+    "khách trẻ",
+    "khách lớn tuổi",
+    "người cao tuổi",
+    "sinh năm",
+    "ngày sinh",
+    "sinh nhật khách",
+    "thế hệ gen"
+   ],
+   "data_keys": [
+    "tuổi",
+    "sinh",
+    "birth",
+    "age",
+    "dob"
+   ],
+   "reason": "Shop không ghi tuổi hoặc ngày sinh của khách hàng."
+  },
+  {
+   "keywords": [
+    "nghề nghiệp",
+    "thu nhập của khách",
+    "trình độ",
+    "tình trạng hôn nhân",
+    "có gia đình",
+    "con cái"
+   ],
+   "data_keys": [
+    "nghề",
+    "thu nhập",
+    "trình độ",
+    "hôn nhân",
+    "occupation",
+    "income"
+   ],
+   "reason": "Shop không ghi thông tin cá nhân (nghề nghiệp, thu nhập, gia đình) của khách hàng."
+  },
+  {
+   "keywords": [
+    "email của khách",
+    "gmail của khách",
+    "facebook",
+    "tiktok",
+    "instagram",
+    "mạng xã hội",
+    "zalo của khách",
+    "link zalo"
+   ],
+   "data_keys": [
+    "email",
+    "e-mail",
+    "mail",
+    "facebook",
+    "zalo",
+    "mạng xã hội",
+    "social"
+   ],
+   "reason": "Shop không ghi thông tin liên hệ mạng xã hội hoặc email của khách hàng."
+  },
+  {
+   "keywords": [
+    "quê quán",
+    "quê ở",
+    "người miền",
+    "vùng miền",
+    "khách ngoại tỉnh",
+    "khách nước ngoài",
+    "quốc tịch",
+    "khách tỉnh"
+   ],
+   "data_keys": [
+    "quê",
+    "vùng",
+    "tỉnh",
+    "quốc tịch",
+    "nationality",
+    "region",
+    "địa chỉ",
+    "thành phố"
+   ],
+   "reason": "Shop không ghi quê quán, vùng miền hoặc quốc tịch của khách hàng."
+  },
+  {
+   "keywords": [
+    "nhiệt độ bảo quản",
+    "nhiệt độ kho",
+    "độ ẩm kho",
+    "bảo quản ở nhiệt độ",
+    "bảo quản lạnh",
+    "điều kiện bảo quản"
+   ],
+   "data_keys": [
+    "nhiệt độ",
+    "nhiet_do",
+    "độ ẩm",
+    "do_am",
+    "temperature",
+    "humidity",
+    "bảo quản"
+   ],
+   "reason": "Dữ liệu shop không theo dõi nhiệt độ hoặc điều kiện bảo quản."
+  },
+  {
+   "keywords": [
+    "khoảng cách từ",
+    "cách bao xa",
+    "mấy cây số",
+    "mấy km",
+    "bao nhiêu km",
+    "google maps",
+    "bản đồ",
+    "lộ trình",
+    "thời gian di chuyển",
+    "đường đi"
+   ],
+   "data_keys": [
+    "khoảng cách",
+    "khoang_cach",
+    "km",
+    "tọa độ",
+    "toa_do",
+    "gps",
+    "lat",
+    "lng",
+    "lộ trình"
+   ],
+   "reason": "Dữ liệu shop không lưu tọa độ hay khoảng cách địa lý giao vận."
+  },
+  {
+   "keywords": [
+    "thời tiết",
+    "dự báo thời tiết",
+    "trời mưa",
+    "trời nắng",
+    "lượng mưa",
+    "nhiệt độ ngoài trời",
+    "mùa mưa",
+    "nắng nóng"
+   ],
+   "data_keys": [
+    "thời tiết",
+    "thoi_tiet",
+    "weather",
+    "mưa",
+    "nhiệt độ"
+   ],
+   "reason": "Dữ liệu kinh doanh không bao gồm thông tin thời tiết hay khí tượng."
+  },
+  {
+   "keywords": [
+    "lịch tàu",
+    "lịch xe",
+    "vé máy bay",
+    "chuyến bay",
+    "bến xe",
+    "giờ tàu",
+    "lịch bay",
+    "vé tàu"
+   ],
+   "data_keys": [
+    "ve_may_bay",
+    "chuyen_bay",
+    "tau_xe",
+    "chuyến bay",
+    "vé"
+   ],
+   "reason": "Dữ liệu bán lẻ không bao gồm lịch trình vận tải hành khách."
+  },
+  {
+   "keywords": [
+    "đối thủ",
+    "thị trường",
+    "giá thị trường",
+    "cửa hàng khác",
+    "shop khác",
+    "tiệm khác",
+    "so với ngành",
+    "trung bình ngành",
+    "hãng khác",
+    "đối thủ cạnh tranh"
+   ],
+   "data_keys": [
+    "đối thủ",
+    "thị trường",
+    "competitor",
+    "market",
+    "giá tham khảo",
+    "giá đối thủ"
+   ],
+   "reason": "Dữ liệu chỉ có hoạt động của shop, không có thông tin về đối thủ hay thị trường bên ngoài."
+  },
+  {
+   "keywords": [
+    "dự đoán",
+    "dự báo",
+    "dự phóng",
+    "tiên đoán",
+    "kỳ vọng sẽ bán",
+    "tháng tới sẽ bán",
+    "tháng sau sẽ bán",
+    "năm sau sẽ bán"
+   ],
+   "data_keys": [
+    "dự báo",
+    "forecast",
+    "kế hoạch",
+    "mục tiêu",
+    "target"
+   ],
+   "reason": "Dữ liệu chỉ ghi những gì đã xảy ra, không dự báo được tương lai."
+  },
+  {
+   "keywords": [
+    "tại sao",
+    "vì sao",
+    "do đâu mà",
+    "nguyên nhân nào",
+    "có nên",
+    "nên nhập",
+    "nên bán",
+    "gợi ý nên",
+    "đề xuất"
+   ],
+   "data_keys": [
+    "lý do",
+    "nguyên nhân",
+    "reason",
+    "ghi chú",
+    "note",
+    "đề xuất"
+   ],
+   "reason": "Câu hỏi hỏi lý do hoặc lời khuyên, không phải con số có thể tính từ dữ liệu."
+  },
+  {
+   "keywords": [
+    "tiền lương",
+    "lương của",
+    "lương nhân viên",
+    "lương tháng",
+    "tiền thưởng",
+    "thưởng nhân viên",
+    "chấm công",
+    "nghỉ phép",
+    "đi làm muộn",
+    "đi trễ"
+   ],
+   "data_keys": [
+    "lương",
+    "luong",
+    "thưởng",
+    "chấm công",
+    "công",
+    "nhân sự",
+    "salary",
+    "payroll"
+   ],
+   "reason": "Shop không có dữ liệu lương, thưởng hay chấm công nhân viên."
+  },
+  {
+   "keywords": [
+    "màu sắc",
+    "xuất xứ",
+    "nơi sản xuất",
+    "nhà sản xuất",
+    "hình ảnh sản phẩm",
+    "kích thước",
+    "kích cỡ",
+    "trọng lượng",
+    "cân nặng sản phẩm",
+    "thành phần",
+    "mùi vị",
+    "hương vị"
+   ],
+   "data_keys": [
+    "màu",
+    "xuất xứ",
+    "nơi sx",
+    "sản xuất",
+    "hình ảnh",
+    "kích thước",
+    "kích cỡ",
+    "quy cách",
+    "size",
+    "trọng lượng",
+    "thành phần",
+    "mô tả",
+    "vị",
+    "thuộc tính"
+   ],
+   "reason": "Danh mục hàng không ghi thuộc tính sản phẩm mà câu hỏi cần (màu, xuất xứ, kích thước, thành phần...)."
+  },
+  {
+   "keywords": [
+    "vị trí kệ",
+    "để ở kệ nào",
+    "nằm ở đâu trong kho",
+    "kệ nào",
+    "khu nào trong kho"
+   ],
+   "data_keys": [
+    "vị trí",
+    "kệ",
+    "location",
+    "khu vực",
+    "kho"
+   ],
+   "reason": "Shop không ghi vị trí kệ hay khu vực lưu kho."
+  }
+ ]
+}

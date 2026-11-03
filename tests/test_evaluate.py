@@ -34,7 +34,10 @@ def test_compare_numbers():
 def test_compare_strings():
     assert compare_strings("Sting dâu 330ml", "sting dâu 330ml")
     assert compare_strings("Cà phê sữa đá", "CA PHE SUA DA") is False  # Dấu tiếng Việt phải đúng theo Mục 9
-    assert compare_strings("Sting dâu 330ml", "Sting dâu 330 ml")
+    # Luật chấm chính thức không bỏ khoảng trắng: chỉ đúng khi cách viết đó có trong danh sách alias
+    assert not compare_strings("Sting dâu 330ml", "Sting dâu 330 ml")
+    assert compare_strings("Sting dâu 330ml", "Sting dâu 330 ml", aliases=["Sting dâu 330ml"])
+    assert compare_strings("Sting-dâu (330ml)", "sting dâu 330ml")
     assert compare_strings("SP01", "Nước ngọt", aliases=["SP01", "Sting"])
 
 

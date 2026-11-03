@@ -61,14 +61,21 @@ MONEY_KEYWORDS = (
     "thu nợ",
     "trả nợ",
     "nợ thêm",
+    "tiền",
+    "đồng",
+    "vnđ",
+    "chi bao nhiêu",
+    "chi tiêu",
+    "lãi",
+    "tiền lời",
+    "thu về",
+    "giá trị đơn",
 )
 
 NON_NEGATIVE_KEYWORDS = (
     "tổng doanh thu",
     "bán được bao nhiêu",
-    "bán đc tổng cộng bao nhiêu",
     "có bao nhiêu đơn",
-    "co bao nhiu don",
     "đếm số đơn",
     "bao nhiêu khách",
     "bao nhiêu đợt",
@@ -156,6 +163,7 @@ def strip_trailing_measurement_in_parens(s: str) -> str:
     if re.match(r"^[\d\.,\s]+$", inside):
         return s[:m.start()].strip()
     # 2. Nếu chứa số tiền hoặc số lượng kèm đơn vị (1.000đ, 307 ly, 10 cái, 15 chai) -> LOẠI BỎ
+    #    (DataMateAgent._ground_strings khôi phục lại tên gốc nếu "(24 lon)" thực ra là một phần tên trong dữ liệu)
     if re.search(r"[\d\.,\s]+(?:đ|vnđ|đồng|ly|chai|nồi|hộp|lon|cái|kg|g|%|bill|đơn|k|cuộn)", inside, re.I):
         return s[:m.start()].strip()
     # 3. Nếu là size ngắn thuần chữ cái (M, L, S, XL, XXL) hoặc quy cách sản phẩm (500mg, 100ml, v.v.), GIỮ NGUYÊN
@@ -172,6 +180,8 @@ def postprocess_and_guard(
     question: str,
     raw_output: Any,
     expected_type: str = "number",
+    code: Optional[str] = None,
+    reject_walk_in: bool = True,
 ) -> Dict[str, Any]:
     """
     Chuẩn hóa kết quả từ Sandbox và áp dụng cơ chế bảo vệ Penalized Accuracy.
@@ -221,6 +231,19 @@ def postprocess_and_guard(
         ans_type = "list"
     elif isinstance(ans_val, bool):
         ans_type = "boolean"
+
+    # Hiệu chỉnh kiểu khi code gán nhầm type nhưng giá trị chuyển được KHÔNG mơ hồ sang kiểu câu hỏi đòi
+    # (sai type là sai dù đúng giá trị, Mục 9)
+    if expected_type == "percent" and ans_type == "number":
+        ans_type = "percent"
+    elif expected_type == "date" and ans_type == "string" and isinstance(ans_val, str) and re.match(r"^\d{4}-\d{2}(-\d{2})?$", ans_val.strip()):
+        ans_type = "date"
+    elif expected_type == "boolean" and ans_type == "string" and isinstance(ans_val, str) and unicodedata.normalize("NFC", ans_val).strip().lower() in (
+        "true", "false", "đúng", "sai", "có", "không"
+    ):
+        ans_type = "boolean"
+    elif expected_type == "string" and ans_type == "list" and isinstance(ans_val, list) and len(ans_val) == 1 and isinstance(ans_val[0], str):
+        ans_type = "string"
 
     # Tự động unpack triệt để các cấu trúc lồng nhau (list/tuple 1 phần tử từ DuckDB fetchall) về scalar
     while isinstance(ans_val, (list, tuple)) and len(ans_val) == 1 and ans_type in ("number", "percent", "string", "date", "boolean"):
@@ -280,9 +303,13 @@ def postprocess_and_guard(
         if float(ans_val) < -100.0 or abs(float(ans_val)) > 5000.0:
             return abstain_resp
 
-        # Tự động quy đổi tỷ số thập phân nếu model trả về dạng tỷ lệ 0 < val < 1.0 (vd: 0.403 cho 40.3%, 0.3517 cho 35.17%)
+        # Quy đổi tỷ số thập phân (0.403 -> 40.3) chỉ khi chắc chắn code KHÔNG nhân 100.
+        # Phần trăm thật nhỏ hơn 1% (vd tăng 0.45%) là hợp lệ, không được nhân thêm 100.
+        # Không có code để kiểm tra (gọi trực tiếp) -> giữ hành vi cũ.
         if 0.0 < abs(float(ans_val)) < 1.0:
-            ans_val = float(ans_val) * 100.0
+            multiplied_in_code = code is not None and bool(re.search(r"\b100(?:\.0*)?\b", code))
+            if not multiplied_in_code:
+                ans_val = float(ans_val) * 100.0
 
         final_pct = round_half_up_2dec(float(ans_val))
 
@@ -298,6 +325,10 @@ def postprocess_and_guard(
         norm_dt = normalize_date_str(ans_val)
         if not norm_dt:
             return abstain_resp
+        # Mục 9: câu hỏi theo tháng ("tháng nào", "tháng mấy") đáp án là "YYYY-MM"
+        q_acc = strip_accents(question)
+        if len(norm_dt) == 10 and re.search(r"\bthang\s*(?:nao|may)\b", q_acc) and not re.search(r"\bngay\s*(?:nao|may|bao nhieu)\b", q_acc):
+            norm_dt = norm_dt[:7]
         return {"id": question_id, "type": "date", "answer": norm_dt}
 
     # 4. Xử lý BOOLEAN
@@ -326,9 +357,10 @@ def postprocess_and_guard(
 
         # Nếu model trả về chuỗi ghép nhiều đối tượng bằng dấu phẩy mà câu hỏi hỏi danh sách/top N/nhiều đối tượng
         # -> Tự động chuyển đổi thành type "list" chuẩn JSON
+        # Không dùng "các"/"những": "Trong các món, món nào..." hỏi một đối tượng, và tên món có thể chứa dấu phẩy
         is_list_q = (
             expected_type == "list"
-            or any(kw in question.lower() for kw in ["top", "danh sách", "liệt kê", "các", "những", "cac", "nhung", "liet ke"])
+            or any(kw in question.lower() for kw in ["top", "danh sách", "liệt kê", "liet ke"])
             or bool(re.search(r"\b(?<!\d)(?:[2-9]|10)\s+(?:khách|khach|mặt hàng|mat hang|món|mon|sản phẩm|san pham|thợ|tho|nhân viên|nhan vien|thuốc|thuoc)\b", question.lower()))
         )
         if "," in clean_str and is_list_q:
@@ -337,7 +369,7 @@ def postprocess_and_guard(
                 for p in clean_str.split(",")
                 if p.strip()
             ]
-            parts = [p for p in parts if p.lower() not in ("khách lẻ", "khach le", "lẻ", "le", "kl", "khách vãng lai")]
+            parts = [p for p in parts if not (reject_walk_in and p.lower() in WALK_IN_LABELS)]
             if len(parts) > 1:
                 return {"id": question_id, "type": "list", "answer": parts}
 
@@ -345,8 +377,8 @@ def postprocess_and_guard(
         # Nhưng TUYỆT ĐỐI giữ nguyên hậu tố size như '(M)', '(L)', '(500mg)'
         clean_str = strip_trailing_measurement_in_parens(clean_str)
 
-        # Mục 3 Rulebook: Khách lẻ / kl không phải khách, không xếp hạng
-        if clean_str.lower() in ("khách lẻ", "khach le", "lẻ", "le", "kl", "khách vãng lai"):
+        # Chỉ khi rulebook ghi khách lẻ không phải khách (không xếp hạng)
+        if reject_walk_in and clean_str.lower() in WALK_IN_LABELS:
             return abstain_resp
 
         if not clean_str or clean_str.lower() in ("none", "nan", "null", "không có", "không có mặt hàng nào"):
@@ -376,7 +408,7 @@ def postprocess_and_guard(
                     strip_trailing_measurement_in_parens(re.sub(r"^\s*[-*•\d\.\)]+\s*", "", p))
                     for p in parts
                 ]
-                ans_val = [p for p in ans_val if p and p.lower() not in ("khách lẻ", "khach le", "lẻ", "le", "kl", "khách vãng lai")]
+                ans_val = [p for p in ans_val if p and not (reject_walk_in and p.lower() in WALK_IN_LABELS)]
 
         if not isinstance(ans_val, list) or len(ans_val) == 0:
             return abstain_resp
@@ -415,7 +447,7 @@ def postprocess_and_guard(
                 # Loại bỏ số tiền/số lượng trong ngoặc đơn của item (giữ nguyên size như (M), (L))
                 s_item = strip_trailing_measurement_in_parens(s_item)
                 # Khử khách lẻ
-                if s_item.lower() in ("khách lẻ", "khach le", "lẻ", "le", "kl", "khách vãng lai", "none", "nan", "null"):
+                if s_item.lower() in ("none", "nan", "null") or (reject_walk_in and s_item.lower() in WALK_IN_LABELS):
                     continue
                 # Tránh chuỗi rác dài bất thường
                 if len(s_item) > 120:
@@ -425,13 +457,15 @@ def postprocess_and_guard(
             else:
                 return abstain_resp
 
-        # Khử trùng lặp liên tiếp giữ nguyên thứ tự
+        # Khử trùng lặp tên giữ nguyên thứ tự. Số KHÔNG khử trùng: [3, 3] (3 thùng 3 chai) là hai giá trị khác nhau.
         seen = set()
         deduped = []
         for x in cleaned_list:
-            if x not in seen:
+            if isinstance(x, str):
+                if x in seen:
+                    continue
                 seen.add(x)
-                deduped.append(x)
+            deduped.append(x)
 
         if not deduped:
             return abstain_resp
@@ -485,8 +519,8 @@ def postprocess_and_guard(
                     s_cell = strip_trailing_measurement_in_parens(unicodedata.normalize("NFC", cell)).strip()
                     if not s_cell:
                         return abstain_resp
-                    # Mục 3 Rulebook: Khách lẻ / khách vãng lai không xếp hạng
-                    if s_cell.lower() in ("khách lẻ", "khach le", "lẻ", "le", "kl", "khách vãng lai"):
+                    # Chỉ khi rulebook ghi khách lẻ không phải khách: không có dòng trong bảng theo khách
+                    if reject_walk_in and s_cell.lower() in WALK_IN_LABELS:
                         is_walkin_row = True
                         break
                     c_row.append(s_cell)
@@ -508,11 +542,6 @@ def postprocess_and_guard(
         if not clean_rows:
             return abstain_resp
 
-        # Chuẩn hóa tên cột bảng công nợ khớp với Rulebook Mục 9 nếu đang dùng nhãn tạm col_1, col_2
-        if len(clean_cols) == 2 and any(clean_cols[0].lower().startswith(prefix) for prefix in ("col_", "cột")):
-            if any(k in question.lower() for k in ("nợ", "công nợ")):
-                clean_cols = ["khach_hang", "so_tien_no"]
-
         return {
             "id": question_id,
             "type": "table",
@@ -522,68 +551,27 @@ def postprocess_and_guard(
     return abstain_resp
 
 
-UNIT_TOKENS = {
-    "kg", "kilo", "g", "gram", "gr", "mg", "ml", "l", "lit",
-    "lon", "chai", "ly", "coc", "hop", "bich", "goi", "bao", "thung", "ket",
-    "dia", "to", "chen", "bat", "phan", "suat", "cai", "chiec", "binh", "hu",
-    "loc", "vi", "cay", "thanh", "cuon", "mieng", "tap", "can", "chuc", "doi", "cap",
-}
+WALK_IN_LABELS = ("khách lẻ", "khach le", "lẻ", "le", "kl", "khách vãng lai", "khach vang lai")
 
-CATEGORY_PREFIXES = {
-    "bia", "nuoc", "tra", "sua", "banh", "keo", "com", "lau", "mi", "bun", "pho",
-    "ca", "phe", "cafe", "bot", "giat",
-}
 
-IGNORABLE_TOKENS = UNIT_TOKENS | CATEGORY_PREFIXES
+def _scorer_norm(text: Any) -> str:
+    """Chuẩn hoá giống luật chấm chuỗi: NFC, chữ thường, ký tự không phải chữ/số -> khoảng trắng. GIỮ dấu."""
+    nfc = unicodedata.normalize("NFC", str(text)).lower()
+    cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in nfc)
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 def are_strings_in_consensus(a1: Any, a2: Any) -> bool:
     """
-    So khớp chuỗi an toàn ngữ nghĩa (Semantic Token Difference).
-    - Đồng thuận nếu chuỗi hoàn toàn trùng nhau hoặc chỉ khác biệt về đơn vị tính / tiền tố ngành hàng chung.
-    - TUYỆT ĐỐI BÁC BỎ nếu khác biệt về tên sản phẩm, biến thể, sub-brand (Omo vs Omo Matic, Tiger vs Tiger Crystal).
+    Hai tên đồng thuận khi trùng nhau sau chuẩn hoá của luật chấm (hoa/thường, khoảng trắng, dấu câu),
+    sau khi bỏ chú thích số đo LLM tự thêm trong ngoặc. KHÔNG bỏ dấu tiếng Việt ("Bánh bò" khác "Bánh bơ")
+    và không dùng từ điển từ bỏ qua (trước đây "Bia Tiger" ~ "Tiger" dựa trên danh sách từ ngành hàng).
     """
     if a1 is None or a2 is None:
         return False
-    s1 = unicodedata.normalize("NFC", str(a1)).strip().strip('\'"“”‘’').strip().lower()
-    s2 = unicodedata.normalize("NFC", str(a2)).strip().strip('\'"“”‘’').strip().lower()
-    if not s1 or not s2:
-        return False
-    if s1 == s2:
-        return True
-
-    # Loại bỏ hậu tố mô tả kích thước / đơn vị tính trong ngoặc đơn
-    c1 = re.sub(r"\s*\([^)]+\)$", "", strip_trailing_measurement_in_parens(s1)).strip()
-    c2 = re.sub(r"\s*\([^)]+\)$", "", strip_trailing_measurement_in_parens(s2)).strip()
-    if c1 == c2:
-        return True
-
-    a1_norm = strip_accents(c1)
-    a2_norm = strip_accents(c2)
-    if a1_norm == a2_norm:
-        return True
-
-    toks1 = [t for t in re.split(r"[\s,_\-./()]+", a1_norm) if t]
-    toks2 = [t for t in re.split(r"[\s,_\-./()]+", a2_norm) if t]
-    set1 = set(toks1)
-    set2 = set(toks2)
-    if not set1 or not set2:
-        return False
-    if set1 == set2:
-        return True
-
-    # Một tập phải là tập con thật sự của tập kia (chỉ khác ở các từ bổ sung một chiều)
-    if not (set1 < set2 or set2 < set1):
-        return False
-
-    # Tất cả các từ khác biệt bắt buộc phải nằm trong IGNORABLE_TOKENS (đơn vị hoặc tiền tố ngành hàng)
-    diff = set1 ^ set2
-    if not (diff <= IGNORABLE_TOKENS):
-        return False
-
-    # Phần giao giữa 2 chuỗi phải chứa ít nhất một từ nội dung cốt lõi không phải từ ignorable
-    common_content = (set1 & set2) - IGNORABLE_TOKENS
-    return len(common_content) > 0
+    c1 = _scorer_norm(strip_trailing_measurement_in_parens(unicodedata.normalize("NFC", str(a1)).strip()))
+    c2 = _scorer_norm(strip_trailing_measurement_in_parens(unicodedata.normalize("NFC", str(a2)).strip()))
+    return bool(c1) and c1 == c2
 
 
 def check_consensus(pred1: Dict[str, Any], pred2: Dict[str, Any]) -> bool:
@@ -632,13 +620,10 @@ def check_consensus(pred1: Dict[str, Any], pred2: Dict[str, Any]) -> bool:
             max_val = max(abs(f1), abs(f2))
             if diff < 1e-4 or (max_val > 0 and diff / max_val < 1e-5):
                 return True
-            # Post-Rounding Consensus: Nếu làm tròn theo luật Mục 9 ra cùng một giá trị
-            # (ví dụ: tiền làm tròn nguyên, hoặc cùng làm tròn 2 chữ số thập phân)
-            if round_half_up_int(f1) == round_half_up_int(f2):
-                return True
-            if round_half_up_2dec(f1) == round_half_up_2dec(f2):
-                return True
-            return False
+            # Post-Rounding Consensus: chỉ so ở độ chính xác chấm điểm (2 chữ số thập phân).
+            # Không so sau khi làm tròn về số nguyên: 12.4% và 12.0% (hay TB 2.45 và 2.1) là hai đáp án khác nhau.
+            # Tiền đã được postprocess làm tròn về đồng trước khi vào đây nên vẫn khớp đúng.
+            return round_half_up_2dec(f1) == round_half_up_2dec(f2)
         except (ValueError, TypeError):
             return False
 
@@ -675,22 +660,8 @@ def check_consensus(pred1: Dict[str, Any], pred2: Dict[str, Any]) -> bool:
                     if not are_strings_in_consensus(x, y):
                         return False
             return True
-        # Nếu khác độ dài: Áp dụng Prefix-Consensus (Paper Borchmann 2025)
-        # Khi danh sách ngắn có ít nhất 2 phần tử và toàn bộ các phần tử của nó trùng với tiền tố của danh sách dài
-        min_len = min(len(a1), len(a2))
-        if min_len >= 2:
-            for i in range(min_len):
-                x = a1[i]
-                y = a2[i]
-                if isinstance(x, (int, float)) and isinstance(y, (int, float)):
-                    diff = abs(float(x) - float(y))
-                    max_v = max(abs(float(x)), abs(float(y)))
-                    if diff >= 1e-4 and (max_v == 0 or diff / max_v >= 1e-5):
-                        return False
-                else:
-                    if not are_strings_in_consensus(x, y):
-                        return False
-            return True
+        # Khác độ dài -> bất đồng: list chấm đúng cả tập lẫn thứ tự, danh sách ngắn hơn là đáp án khác.
+        # (Câu hỏi top k đã được DataMateAgent cắt về k phần tử trước khi so.)
         return False
 
     # 6. So khớp TABLE

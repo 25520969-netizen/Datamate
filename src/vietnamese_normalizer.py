@@ -10,6 +10,8 @@ Dựa trên cơ sở lý thuyết và thực nghiệm từ hai công trình họ
 
 import re
 import unicodedata
+
+from src.lexicon import load_lexicon
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -21,7 +23,7 @@ def to_nfc(text: str) -> str:
 class VietnameseNormalizer:
     """
     Bộ chuẩn hoá câu hỏi tiếng Việt tổng quát hoá:
-    - Lớp 1 (Deterministic): Sửa lỗi gõ Telex phổ biến, chuẩn hóa Unicode NFC, loại bỏ khoảng trắng thừa.
+    - Lớp 1 (Deterministic): Chuẩn hóa Unicode NFC, mở rộng viết tắt nghiệp vụ, loại bỏ khoảng trắng thừa.
     - Lớp 2 (Context-Aware LLM Rewriting): Sử dụng động cơ Qwen2.5-Coder (chạy offline local) để chuẩn hoá
       các từ địa phương, teen code và từ viết tắt dựa trên cấu trúc bảng/cột của DB mà không cần từ điển cứng.
     """
@@ -37,61 +39,10 @@ class VietnameseNormalizer:
         "Chỉ trả về DUY NHẤT một câu hỏi đã chuẩn hoá, không giải thích gì thêm."
     )
 
-    # Bảng từ viết tắt nghiệp vụ kinh doanh phổ biến
-    BUSINESS_ABBREVIATIONS = [
-        (re.compile(r"\b(?:dthu|dt)\b(?!\s*[:=]\s*\d{8,11})", re.IGNORECASE), "doanh thu"),
-        (re.compile(r"\bsp\b", re.IGNORECASE), "sản phẩm"),
-        (re.compile(r"\bkh\b", re.IGNORECASE), "khách hàng"),
-        (re.compile(r"\bncc\b", re.IGNORECASE), "nhà cung cấp"),
-        (re.compile(r"\bhsd\b", re.IGNORECASE), "hạn sử dụng"),
-        (re.compile(r"\bnsx\b", re.IGNORECASE), "ngày sản xuất"),
-        (re.compile(r"\b(?:đvt|dvt)\b", re.IGNORECASE), "đơn vị tính"),
-        (re.compile(r"\b(?:sl|sluong)\b", re.IGNORECASE), "số lượng"),
-        (re.compile(r"\bck\b", re.IGNORECASE), "chiết khấu"),
-        (re.compile(r"\b(?:đc|dc)\b(?!\s*\d)", re.IGNORECASE), "được"),
-        (re.compile(r"\b(?:bn|bnhiu|bnhieu|bao\s+nhiu|nhiu)\b", re.IGNORECASE), "bao nhiêu"),
-        (re.compile(r"\b(?:hđ|hd)\b(?!\s*\d)", re.IGNORECASE), "hóa đơn"),
-        (re.compile(r"\bgd\b", re.IGNORECASE), "giao dịch"),
-        (re.compile(r"\btk\b(?!\s*\d)", re.IGNORECASE), "tồn kho"),
-        (re.compile(r"\bnv\b", re.IGNORECASE), "nhân viên"),
-        (re.compile(r"\bct\b(?!\s*\d)", re.IGNORECASE), "chứng từ"),
-    ]
+    # Viết tắt / tiếng lóng lấy từ từ điển assets/lexicon.json (học từ bộ train, có điều kiện theo ngữ cảnh)
 
-    # Bảng sửa lỗi gõ Telex cơ bản (không phụ thuộc dữ liệu cụ thể, chỉ dựa trên quy tắc gõ bàn phím Telex tiếng Việt)
-    TELEX_PATTERNS = [
-        (re.compile(r"\bnaof\b", re.IGNORECASE), "nào"),
-        (re.compile(r"\bthangs\b", re.IGNORECASE), "tháng"),
-        (re.compile(r"\bcuwar\b", re.IGNORECASE), "cửa"),
-        (re.compile(r"\bnhaf\b", re.IGNORECASE), "nhà"),
-        (re.compile(r"\bduocj\b", re.IGNORECASE), "được"),
-        (re.compile(r"\bbani\b", re.IGNORECASE), "bán"),
-        (re.compile(r"\btieenf\b", re.IGNORECASE), "tiền"),
-        (re.compile(r"\bcuoois\b", re.IGNORECASE), "cuối"),
-        (re.compile(r"\bcuar\b", re.IGNORECASE), "của"),
-        (re.compile(r"\bnhoms\b", re.IGNORECASE), "nhóm"),
-        (re.compile(r"\blaf\b", re.IGNORECASE), "là"),
-        (re.compile(r"\bhown\b", re.IGNORECASE), "hơn"),
-        (re.compile(r"\btrar\b", re.IGNORECASE), "trả"),
-        (re.compile(r"\bhees\b", re.IGNORECASE), "hết"),
-        (re.compile(r"\bngayf\b", re.IGNORECASE), "ngày"),
-        (re.compile(r"\bnhaats\b", re.IGNORECASE), "nhất"),
-        (re.compile(r"\btrawm\b", re.IGNORECASE), "trăm"),
-        (re.compile(r"\bnhieeuf\b", re.IGNORECASE), "nhiều"),
-        (re.compile(r"\bnhieefu\b", re.IGNORECASE), "nhiều"),
-        (re.compile(r"\bquarr\b", re.IGNORECASE), "quả"),
-        (re.compile(r"\bnhieeu\b", re.IGNORECASE), "nhiều"),
-        (re.compile(r"\bbieets\b", re.IGNORECASE), "biết"),
-        (re.compile(r"\bvaayj\b", re.IGNORECASE), "vậy"),
-        (re.compile(r"\bddown\b", re.IGNORECASE), "đơn"),
-        (re.compile(r"\bsoos\b", re.IGNORECASE), "số"),
-        (re.compile(r"\bcos\b", re.IGNORECASE), "có"),
-        (re.compile(r"\bmawtj\b", re.IGNORECASE), "mặt"),
-        (re.compile(r"\bhangf\b", re.IGNORECASE), "hàng"),
-        (re.compile(r"\bcungf\b", re.IGNORECASE), "cùng"),
-        (re.compile(r"\bthuoocs\b", re.IGNORECASE), "thuốc"),
-        (re.compile(r"\bmaays\b", re.IGNORECASE), "mấy"),
-        (re.compile(r"\bconf\b", re.IGNORECASE), "còn"),
-    ]
+    # Không giữ danh sách lỗi gõ cụ thể (trước đây chép từ câu hỏi bộ train: "naof", "cuwar", "bani"...):
+    # lỗi gõ được xử lý chung ở bước viết lại câu hỏi bằng LLM (canonicalize).
 
     def __init__(self, llm_client: Optional[Any] = None) -> None:
         self.llm_client = llm_client
@@ -142,11 +93,7 @@ class VietnameseNormalizer:
         s = to_nfc(text.strip())
         masked, entity_map = cls.mask_entities(s)
 
-        for pat, repl in cls.TELEX_PATTERNS:
-            masked = pat.sub(repl, masked)
-
-        for pat, repl in cls.BUSINESS_ABBREVIATIONS:
-            masked = pat.sub(repl, masked)
+        masked = load_lexicon().expand_query(masked)
 
         # Khôi phục thực thể bảo vệ
         restored = cls.unmask_entities(masked, entity_map)
@@ -257,11 +204,15 @@ class VietnameseNormalizer:
             if cleaned_reply.startswith("Câu hỏi chuẩn hoá:"):
                 cleaned_reply = cleaned_reply[len("Câu hỏi chuẩn hoá:"):].strip()
 
-            if len(cleaned_reply) >= 5 and not cleaned_reply.startswith("```"):
-                # Khôi phục thực thể
-                restored = self.unmask_entities(cleaned_reply, entity_map)
-                self._cache[cache_key] = to_nfc(restored)
-                return self._cache[cache_key]
+            # Bản viết lại phải giữ nguyên mọi thực thể đã che; mất token nghĩa là LLM đã đổi nghĩa câu hỏi
+            if (
+                len(cleaned_reply) >= 5
+                and not cleaned_reply.startswith("```")
+                and all(tok in cleaned_reply for tok in entity_map)
+            ):
+                # Cache bản còn che thực thể: hai câu chỉ khác thực thể ("(M)" vs "(L)") dùng chung khóa cache
+                self._cache[cache_key] = to_nfc(cleaned_reply)
+                return self.unmask_entities(self._cache[cache_key], entity_map)
         except Exception:
             pass
 

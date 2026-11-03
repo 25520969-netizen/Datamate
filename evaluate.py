@@ -67,6 +67,11 @@ def compare_numbers(pred: Any, gold: Any, tol: float = 1e-5) -> bool:
     return abs(float(pred) - float(gold)) <= tol
 
 
+def _round_half_up_2dec(val: float) -> float:
+    from decimal import Decimal, ROUND_HALF_UP
+    return float(Decimal(str(val)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
 def compare_strings(pred: Any, gold: Any, aliases: Optional[List[str]] = None) -> bool:
     """So sánh chuỗi dự đoán với đáp án chuẩn và danh sách alias."""
     if not isinstance(pred, str) or not isinstance(gold, str):
@@ -76,14 +81,11 @@ def compare_strings(pred: Any, gold: Any, aliases: Optional[List[str]] = None) -
         candidates.extend(a for a in aliases if isinstance(a, str))
 
     pred_norm = normalize_string(pred)
-    pred_compact = normalize_string_compact(pred)
     if not pred_norm:
         return normalize_string(gold) == ""
 
-    for cand in candidates:
-        if pred_norm == normalize_string(cand) or pred_compact == normalize_string_compact(cand):
-            return True
-    return False
+    # Luật chấm chính thức: so khớp tuyệt đối sau chuẩn hoá (KHÔNG bỏ khoảng trắng: "1000mg" khác "1000 mg")
+    return any(pred_norm == normalize_string(cand) for cand in candidates)
 
 
 def compare_dates(pred: Any, gold: Any) -> bool:
@@ -256,7 +258,12 @@ def score_single_prediction(pred_obj: Optional[Dict[str, Any]], gold_obj: Dict[s
 
     pred_ans = pred_obj.get("answer")
 
-    if gold_type in ("number", "percent"):
+    if gold_type == "percent":
+        # Luật chấm: khớp tuyệt đối sau khi làm tròn 2 chữ số thập phân, đúng dấu
+        is_ok = is_json_number(pred_ans) and is_json_number(gold_ans) and compare_numbers(
+            _round_half_up_2dec(pred_ans), _round_half_up_2dec(gold_ans), tol=1e-9
+        )
+    elif gold_type == "number":
         is_ok = compare_numbers(pred_ans, gold_ans)
     elif gold_type == "boolean":
         is_ok = isinstance(pred_ans, bool) and pred_ans == gold_ans

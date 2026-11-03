@@ -2,9 +2,9 @@
 """
 Module 1: Ingestion & Schema Standardization Engine.
 - Đọc và chuẩn hóa dữ liệu từ `.xlsx` (1 sheet, nhiều sheet theo tháng, hoặc nhiều sheet đa bảng),
-  `.csv`, và `.sqlite` trên toàn bộ 30 doanh nghiệp (`biz_101` .. `biz_130`).
+  `.csv`, và `.sqlite` của từng doanh nghiệp.
 - Chuẩn hóa toàn bộ tên bảng, tên cột và chuỗi về Unicode NFC (tránh lỗi NFD trên macOS).
-- Tự động gộp các bảng phân mảnh (`_1`, `_2`, `_2025`, `_2026`).
+- Tự động gộp các bảng cùng cấu trúc bị chia theo kỳ/đợt.
 - Áp dụng quy tắc Mục 8 Rulebook:
   * Fill-down các thông tin cấp đơn hàng (trạng thái, khách hàng, ngày, giờ, ghi chú) bị để trống ở các dòng sau.
   * Loại bỏ hai dòng của cùng một đơn giống nhau ở mọi ô (chỉ áp dụng cho bảng có cột mã đơn;
@@ -24,6 +24,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import duckdb
 import pandas as pd
+
+from src.lexicon import load_lexicon
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 try:
@@ -94,16 +96,52 @@ def to_nfc(text: Any) -> Any:
     return text
 
 
+_DOT_THOUSANDS_RE = re.compile(r"^[+-]?\d{1,3}(?:\.\d{3})+$")
+_PLAIN_INT_RE = re.compile(r"^[+-]?\d+$")
+_DECIMAL_COMMA_RE = re.compile(r"^([+-]?\d+),(\d{1,2})$")
+MONEY_COL_HINTS = ("tiền", "tien", "giá", "gia", "doanh thu", "nợ", "thanh toán", "phải trả", "phải thu", "chi phí", "vnd", "vnđ", "trị giá")
+
+
+def _column_uses_dot_thousands(col_name: str, raw_values: pd.Series) -> bool:
+    """
+    "55.000" trong cột tiền là 55 nghìn đồng (dấu chấm phân cách nghìn kiểu Việt Nam), không phải 55.0.
+    Chỉ kết luận theo CẢ CỘT: mọi ô là số nguyên hoặc dạng d.ddd(.ddd)*, có ít nhất một ô có dấu chấm,
+    và (tên cột là tiền/giá hoặc có ô nhiều nhóm như "1.234.567").
+    """
+    vals = raw_values.dropna().astype(str).str.strip()
+    vals = vals[vals != ""]
+    if vals.empty:
+        return False
+    dotted = vals[vals.str.contains(".", regex=False)]
+    if dotted.empty:
+        return False
+    if not vals.map(lambda v: bool(_DOT_THOUSANDS_RE.match(v) or _PLAIN_INT_RE.match(v))).all():
+        return False
+    is_money = any(h in str(col_name).lower() for h in MONEY_COL_HINTS)
+    return is_money or int(dotted.str.count(r"\.").max()) >= 2
+
+
 def _read_csv_robust(file_path: Path) -> pd.DataFrame:
     """Đọc file CSV với khả năng tự động xử lý BOM (utf-8-sig) và fallback đa bảng mã (windows-1258, latin-1)."""
     encodings_to_try = ["utf-8-sig", "utf-8", "windows-1258", "latin-1"]
     last_err: Optional[Exception] = None
     for enc in encodings_to_try:
         try:
-            return pd.read_csv(file_path, encoding=enc, low_memory=False)
+            df = pd.read_csv(file_path, encoding=enc, low_memory=False)
         except (UnicodeDecodeError, Exception) as e:
             last_err = e
             continue
+        # pandas đã đọc "55.000" thành 55.0: đọc lại chuỗi gốc của các cột float để nhận phân cách nghìn
+        float_cols = [c for c in df.columns if pd.api.types.is_float_dtype(df[c])]
+        if float_cols:
+            try:
+                raw = pd.read_csv(file_path, encoding=enc, low_memory=False, dtype=str, usecols=float_cols)
+                for c in float_cols:
+                    if _column_uses_dot_thousands(c, raw[c]):
+                        df[c] = raw[c].map(lambda v: float(v.strip().replace(".", "")) if isinstance(v, str) and v.strip() else None)
+            except Exception:
+                pass
+        return df
     if last_err:
         raise last_err
     return pd.read_csv(file_path, low_memory=False)
@@ -311,6 +349,64 @@ CANONICAL_STATUS_MAP = {
     "shipping": "Đang giao",
 }
 
+_RETURN_STATUS_PAT = re.compile(r"trả hàng|trả lại|hoàn hàng|hoàn trả|đổi trả|khách trả|hàng trả|return", re.I)
+_CANCEL_STATUS_PAT = re.compile(r"hủy|huỷ|cancel", re.I)
+_SHIPPING_STATUS_PAT = re.compile(r"đang giao|đang vận chuyển|đang ship|chờ giao|chờ lấy|đang gửi|pending|shipping", re.I)
+_DONE_STATUS_PAT = re.compile(r"hoàn thành|hoàn tất|thành công|đã giao|đã lấy|xong|completed|finish|delivered", re.I)
+PAYMENT_STATUS_NAME_HINTS = ("thanh toán", "thanh_toan", "thanhtoan", "payment", "tt thanh", "công nợ", "cong no", "nợ")
+
+
+def normalize_order_status(v: Any) -> Any:
+    """Đưa trạng thái đơn về 4 giá trị chuẩn (Mục 8). Không nhận dạng được -> giữ nguyên (không đoán).
+    Chỉ cụm "trả hàng/trả lại/hoàn hàng..." mới là trả hàng; "Đã trả" (đã trả tiền) KHÔNG phải trả hàng."""
+    if not isinstance(v, str):
+        return v
+    key = v.strip().lower()
+    if key in CANONICAL_STATUS_MAP:
+        return CANONICAL_STATUS_MAP[key]
+    lex_hit = load_lexicon().canonical_status(v)
+    if lex_hit is not None:
+        return lex_hit
+    if _CANCEL_STATUS_PAT.search(key):
+        return "Đã hủy"
+    if _RETURN_STATUS_PAT.search(key):
+        return "Trả hàng"
+    if _SHIPPING_STATUS_PAT.search(key):
+        return "Đang giao"
+    if _DONE_STATUS_PAT.search(key):
+        return "Hoàn thành"
+    return v
+
+
+def pick_order_status_col(df: pd.DataFrame) -> Optional[str]:
+    """Chọn cột trạng thái ĐƠN (không phải trạng thái thanh toán): trong các cột có tên kiểu trạng thái,
+    lấy cột có tỉ lệ giá trị nhận dạng được thành 4 trạng thái chuẩn cao nhất."""
+    cands = []
+    for c in df.columns:
+        cl = str(c).lower().strip()
+        if cl in ("status_norm",) or any(h in cl for h in PAYMENT_STATUS_NAME_HINTS):
+            continue
+        if cl in ORDER_STATUS_COL_NAMES or any(cl.startswith(p) for p in ("trạng thái", "trang thai", "tt đơn", "tình trạng", "ghi chú tt")):
+            cands.append(c)
+    best, best_score = None, -1.0
+    for c in cands:
+        vals = df[c].dropna().astype(str)
+        if vals.empty:
+            continue
+        mapped = vals.head(2000).map(normalize_order_status)
+        score = mapped.isin(["Hoàn thành", "Đã hủy", "Trả hàng", "Đang giao"]).mean()
+        if score > best_score:
+            best, best_score = c, score
+    return best
+
+
+def _strict_name_key(text: Any) -> str:
+    """Khóa so tên GIỮ dấu tiếng Việt: NFC, chữ thường, dấu câu -> khoảng trắng, gộp khoảng trắng."""
+    s = unicodedata.normalize("NFC", str(text)).lower()
+    s = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
 _COMMA_NUM_RE = re.compile(r"^[+-]?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?$")
 _SPACE_NUM_RE = re.compile(r"^[+-]?\d{1,3}(?:\s+\d{3})+(?:\.\d+)?$")
 _DOT_VND_RE = re.compile(r"^([+-]?\d{1,3}(?:\.\d{3})+)\s*(?:đ|d|vnđ|vnd)?$", re.IGNORECASE)
@@ -326,7 +422,7 @@ _VN_TEXT_DATE_RE = re.compile(
 )
 _EXCEL_SERIAL_RE = re.compile(r"^\d{5}(?:\.\d+)?$")
 _ISO_MIDNIGHT_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})[T\s]+00:00(?::00)?(?:\.0+)?$")
-CACHE_VERSION = "v11"
+CACHE_VERSION = "v16"
 
 
 def parse_vn_numeric_value(val: Any, is_qty_col: bool = False) -> Optional[float]:
@@ -343,6 +439,10 @@ def parse_vn_numeric_value(val: Any, is_qty_col: bool = False) -> Optional[float
         return None
     if _COMMA_NUM_RE.match(s):
         return float(s.replace(",", ""))
+    m_dc = _DECIMAL_COMMA_RE.match(s)
+    if m_dc:
+        # "1,5" / "12,75": dấu phẩy thập phân kiểu Việt Nam (nhóm nghìn luôn đủ 3 chữ số)
+        return float(f"{m_dc.group(1)}.{m_dc.group(2)}")
     if _SPACE_NUM_RE.match(s):
         return float(re.sub(r"\s+", "", s))
     m_dot = _DOT_VND_RE.match(s)
@@ -428,6 +528,32 @@ def normalize_date_value_iso(val: Any) -> Any:
     return s
 
 
+def _is_month_first_column(series: pd.Series) -> bool:
+    """Cột ngày ghi MM/DD/YYYY: có ô phần thứ hai > 12 và KHÔNG có ô phần thứ nhất > 12.
+    Khi đó mọi ô của cột (kể cả "03/04/2026") phải đọc theo tháng trước, không chỉ ô có ngày > 12."""
+    if series.dtype != object:
+        return False
+    first_gt12 = second_gt12 = False
+    for v in series.dropna().astype(str).head(5000):
+        m = _DMY_DATE_RE.match(v.strip())
+        if not m:
+            continue
+        a, b = int(m.group(1)), int(m.group(2))
+        first_gt12 = first_gt12 or a > 12
+        second_gt12 = second_gt12 or b > 12
+        if first_gt12:
+            return False
+    return second_gt12 and not first_gt12
+
+
+def _normalize_month_first(val: Any) -> Any:
+    if isinstance(val, str):
+        m = _DMY_DATE_RE.match(to_nfc(val).strip())
+        if m:
+            val = f"{m.group(2)}/{m.group(1)}/{m.group(3)}" + (f" {m.group(4)}" if m.group(4) else "")
+    return normalize_date_value_iso(val)
+
+
 def coerce_formatted_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     Chuyển đổi các cột số học bị lưu dưới dạng chuỗi có dấu phẩy phân cách hàng nghìn,
@@ -490,6 +616,11 @@ def coerce_formatted_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
         if non_empty.empty:
             continue
         is_qty_col = any(qkw in col_lower for qkw in QTY_COL_KEYWORDS)
+        if _column_uses_dot_thousands(col, non_empty):
+            df[col] = df[col].map(
+                lambda v: float(str(v).strip().replace(".", "")) if isinstance(v, str) and str(v).strip() else (None if v is None or (isinstance(v, float) and pd.isna(v)) else v)
+            )
+            continue
         sample = non_empty.head(300)
         if sample.map(lambda v: parse_vn_numeric_value(v, is_qty_col=is_qty_col) is not None).all():
             converted = df[col].map(lambda v: parse_vn_numeric_value(v, is_qty_col=is_qty_col))
@@ -512,13 +643,11 @@ def normalize_dataframe_nfc(df: pd.DataFrame) -> pd.DataFrame:
             k in col_low for k in ("ngày", "ngay", "thời gian", "thời điểm", "hạn", "han ", "hsd", "date")
         ) and not any(ex in col_low for ex in ("số ngày", "so ngay", "hạn nợ"))
         if is_date_col:
-            df[col] = df[col].map(normalize_date_value_iso)
+            df[col] = df[col].map(normalize_date_value_iso if not _is_month_first_column(df[col]) else _normalize_month_first)
         elif df[col].dtype == object:
             df[col] = df[col].map(lambda x: to_nfc(x) if isinstance(x, str) else x)
         if col_low in ORDER_STATUS_COL_NAMES and df[col].dtype == object:
-            df[col] = df[col].map(
-                lambda x: CANONICAL_STATUS_MAP.get(x.lower().strip(), x) if isinstance(x, str) else x
-            )
+            df[col] = df[col].map(normalize_order_status)
     df = coerce_formatted_numeric_columns(df)
     return df
 
@@ -554,6 +683,41 @@ def fix_yearless_dates_in_series(series: pd.Series, sheet_year: Optional[int]) -
     return series.map(_fix_val)
 
 
+LINE_LEVEL_NAME_HINTS = (
+    "tên", "ten", "hàng", "hang", "sản phẩm", "san pham", "món", "mon", "sp", "sku", "barcode", "size",
+    "đvt", "dvt", "đơn vị", "don vi", "quy cách", "topping", "lô", "hạn", "biến thể", "màu", "loại",
+)
+
+
+def _detect_order_constant_text_cols(
+    df: pd.DataFrame, order_col: str, is_subtotal: pd.Series, exclude: set
+) -> List[str]:
+    """
+    Mục 8 Rulebook: ô trống ở các dòng sau của một đơn giống ô dòng đầu. Ngoài các cột cấp đơn nhận theo tên,
+    nhận thêm cột chữ (vd "Mã KH", "SĐT", "Thu ngân") mà dữ liệu cho thấy luôn bất biến trong mỗi đơn:
+    ở >= 3 đơn nhiều dòng đã điền đủ, mọi dòng cùng giá trị; và có đơn bị để trống ở dòng sau.
+    """
+    cand: List[str] = []
+    valid = df[order_col].notna() & ~is_subtotal
+    for c in df.columns:
+        if c == order_col or c in exclude or c.startswith("_") or df[c].dtype != object:
+            continue
+        c_low = c.lower()
+        if any(h in c_low for h in LINE_LEVEL_NAME_HINTS):
+            continue
+        col = df.loc[valid, c].mask(df.loc[valid, c].astype(str).str.strip().isin(["", "nan", "<na>", "None"]))
+        if not (col.isna().any() and col.notna().any()):
+            continue
+        grp = pd.DataFrame({"o": df.loc[valid, order_col], "v": col}).groupby("o")["v"]
+        sizes = grp.size()
+        full = grp.count()
+        nuniq = grp.nunique()
+        multi_full = (sizes >= 2) & (full == sizes)
+        if multi_full.sum() >= 3 and (nuniq[multi_full] <= 1).all() and (nuniq <= 1).all():
+            cand.append(c)
+    return cand
+
+
 def apply_rulebook_section8_cleaning(df: pd.DataFrame) -> pd.DataFrame:
     """
     Áp dụng quy tắc làm sạch dữ liệu tại Mục 8 Rulebook:
@@ -571,7 +735,7 @@ def apply_rulebook_section8_cleaning(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # Loại bỏ các dòng bị lặp lại tiêu đề cột (như lỗi lặp header phân trang ở dev_010)
+    # Loại bỏ các dòng bị lặp lại tiêu đề cột (lỗi lặp header khi xuất file phân trang)
     if df.shape[1] >= 2 and len(df) >= 2:
         header_match = df.astype(str).apply(
             lambda col: col.str.strip().str.lower() == str(col.name).strip().lower()
@@ -613,7 +777,7 @@ def apply_rulebook_section8_cleaning(df: pd.DataFrame) -> pd.DataFrame:
                 is_subtotal = is_subtotal | (na_order_mask & df[tc].astype(str).str.contains(subtotal_pat, na=False))
 
             # Phát hiện thêm các dòng footer / subtotal tự do không có từ khóa "tổng/cộng"
-            # (Ví dụ: dòng 90850 dev_001 có Thành tiền 10,104,800 nhưng Ngày, Tên hàng, Khách hàng đều là NA)
+            # (dòng có số tiền nhưng mọi cột chiều như Ngày, Tên hàng, Khách hàng đều trống)
             dim_keywords = ("ngày", "ngay", "thời gian", "tên", "ten", "sản phẩm", "hàng hóa", "khách hàng", "khách", "mặt hàng", "món", "nội dung")
             present_dims = [c for c in df.columns if c != order_col and any(k in c.lower() for k in dim_keywords) and not c.startswith("_")]
             if present_dims:
@@ -642,6 +806,7 @@ def apply_rulebook_section8_cleaning(df: pd.DataFrame) -> pd.DataFrame:
                 for c in df.columns
                 if c != order_col and any(c.lower().startswith(p) for p in ORDER_LEVEL_COL_PREFIXES)
             ]
+            order_level_cols += _detect_order_constant_text_cols(df, order_col, is_subtotal, exclude=set(order_level_cols))
             for c in order_level_cols:
                 if df[c].dtype == object:
                     df[c] = df[c].mask(df[c].astype(str).str.strip().isin(["", "nan", "<na>"]), pd.NA)
@@ -666,6 +831,11 @@ def apply_rulebook_section8_cleaning(df: pd.DataFrame) -> pd.DataFrame:
         text_cols = [c for c in df.columns if df[c].dtype == object and not c.startswith("_")]
         for tc in text_cols:
             is_subtotal = is_subtotal | df[tc].astype(str).str.contains(subtotal_pat, na=False)
+        # Dòng tổng thật chỉ có nhãn "Tổng/Cộng..." và số; dòng nghiệp vụ như "Tổng vệ sinh máy lạnh | Sửa chữa | 2026-01-03"
+        # còn nhiều ô chữ khác -> giữ lại (bảng không ghi theo đơn: mỗi dòng là một lần ghi)
+        if text_cols and is_subtotal.any():
+            filled_text = df[text_cols].apply(lambda col: col.notna() & (col.astype(str).str.strip() != ""))
+            is_subtotal = is_subtotal & (filled_text.sum(axis=1) <= 1)
 
         dim_keywords = ("ngày", "ngay", "thời gian", "tên hàng", "sản phẩm", "hàng hóa", "khách hàng", "khách", "mặt hàng")
         present_dims = [c for c in df.columns if any(k in c.lower() for k in dim_keywords) and not c.startswith("_")]
@@ -697,9 +867,15 @@ class BusinessDataStore:
             # Trên Google Colab, luôn ưu tiên SSD cục bộ /content/.cache thay vì ghi vào Drive qua FUSE
             self.cache_root = Path("/content/.cache/ingested")
         else:
-            self.cache_root = self.data_root.parent.parent / ".cache" / "ingested"
+            # Bố cục <tập>/data/<shop>: cache ở thư mục cha của tập; bố cục preprocessed <tập>/<shop>: cache cạnh thư mục tập
+            base = self.data_root.parent.parent if self.data_root.name == "data" else self.data_root.parent
+            self.cache_root = base / ".cache" / "ingested"
         self._mem_cache: Dict[str, Dict[str, pd.DataFrame]] = {}
         self._readme_cache: Dict[str, str] = {}
+        self._date_range_cache: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+        self._category_cache: Dict[str, set] = {}
+        self._schema_cols_cache: Dict[Tuple[str, str], Tuple[str, ...]] = {}
+        self._schema_render_cache: Dict[Tuple[Any, ...], List[str]] = {}
 
     def get_biz_dir(self, business_id: str) -> Path:
         return self.data_root / business_id
@@ -715,7 +891,26 @@ class BusinessDataStore:
         return content
 
     def get_shop_date_range(self, business_id: str) -> Tuple[Optional[str], Optional[str]]:
-        """Xác định ngày nhỏ nhất và lớn nhất có dữ liệu bán/nhập hàng của cửa hàng."""
+        """Xác định ngày nhỏ nhất và lớn nhất có dữ liệu bán/nhập hàng của cửa hàng (tính một lần mỗi shop)."""
+        if business_id not in self._date_range_cache:
+            self._date_range_cache[business_id] = self._compute_shop_date_range(business_id)
+        return self._date_range_cache[business_id]
+
+    def get_category_values(self, business_id: str) -> set:
+        """Giá trị chữ ngắn (bỏ dấu, chữ thường) của các cột ít giá trị (nhóm hàng, loại, kênh...) trong dữ liệu shop."""
+        if business_id not in self._category_cache:
+            vals: set = set()
+            for df in self.load_tables(business_id).values():
+                for col in df.columns:
+                    if df[col].dtype != object:
+                        continue
+                    uniq = df[col].dropna().unique()
+                    if 0 < len(uniq) <= 300:
+                        vals.update(_accent_strip_key(v) for v in uniq if isinstance(v, str) and len(v) <= 60)
+            self._category_cache[business_id] = vals
+        return self._category_cache[business_id]
+
+    def _compute_shop_date_range(self, business_id: str) -> Tuple[Optional[str], Optional[str]]:
         tables = self.load_tables(business_id)
         all_dts: List[str] = []
         for tname, df in tables.items():
@@ -743,6 +938,19 @@ class BusinessDataStore:
             return (min(all_dts), max(all_dts))
         return (None, None)
 
+    def _source_fingerprint(self, business_id: str) -> str:
+        """Dấu vân tay thư mục nguồn: đường dẫn tuyệt đối + (tên, kích thước, mtime) của mọi file."""
+        import hashlib
+
+        biz_dir = self.get_biz_dir(business_id)
+        h = hashlib.sha1(str(biz_dir.resolve()).encode("utf-8"))
+        if biz_dir.exists():
+            for f in sorted(biz_dir.rglob("*")):
+                if f.is_file():
+                    st = f.stat()
+                    h.update(f"{f.relative_to(biz_dir)}|{st.st_size}|{int(st.st_mtime)}".encode("utf-8"))
+        return h.hexdigest()
+
     def load_tables(self, business_id: str, use_cache: bool = True) -> Dict[str, pd.DataFrame]:
         """
         Nạp toàn bộ bảng dữ liệu của một `business_id` thành dict[table_name, DataFrame].
@@ -754,10 +962,13 @@ class BusinessDataStore:
         biz_cache_dir = self.cache_root / business_id
         manifest_path = biz_cache_dir / "_manifest.json"
 
+        fingerprint = self._source_fingerprint(business_id)
         if use_cache and manifest_path.exists():
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                if manifest.get("version") == CACHE_VERSION:
+                # Cache chỉ hợp lệ cho đúng thư mục nguồn và đúng nội dung file (tránh tập test dùng nhầm cache
+                # của tập train có cùng business_id, hoặc dữ liệu đã thay đổi)
+                if manifest.get("version") == CACHE_VERSION and manifest.get("source_fingerprint") == fingerprint:
                     tables: Dict[str, pd.DataFrame] = {}
                     for tbl_name, pq_file in manifest.get("tables", {}).items():
                         pq_path = biz_cache_dir / pq_file
@@ -786,7 +997,7 @@ class BusinessDataStore:
                     manifest_tables[tbl_name] = pq_filename
                 manifest_path.write_text(
                     json.dumps(
-                        {"version": CACHE_VERSION, "business_id": business_id, "tables": manifest_tables},
+                        {"version": CACHE_VERSION, "business_id": business_id, "source_fingerprint": fingerprint, "tables": manifest_tables},
                         ensure_ascii=False,
                         indent=2,
                     ),
@@ -811,6 +1022,7 @@ class BusinessDataStore:
 
             # 1. Khách hàng (Tên)
             cust_name_syns = ["Khách hàng", "Tên KH", "Tên khách hàng", "Tên khách", "Khách hàng (tên)", "TenKH", "KH"]
+            cust_name_syns = cust_name_syns + [n for n in load_lexicon().role_names("customer_name") if n not in cust_name_syns]
             found_cust_name = next((c for c in cust_name_syns if c in df.columns), None)
             if found_cust_name:
                 for target in ["Khách hàng", "Tên KH", "Tên khách hàng", "Tên khách"]:
@@ -829,10 +1041,11 @@ class BusinessDataStore:
 
             # 3. Mã đơn hàng / Chứng từ
             order_syns = ["Mã đơn hàng", "Mã hóa đơn", "Mã chứng từ", "Số chứng từ", "SoCT", "Số HĐ", "Mã GD", "Mã đơn", "Ma don", "Số phiếu", "Mã giao dịch", "MaHoaDon", "MaDonHang"]
+            order_syns = order_syns + [n for n in load_lexicon().role_names("order_id") if n not in order_syns]
             found_order = next((c for c in order_syns if c in df.columns), None)
             if not found_order:
                 # Fallback: nếu bảng không có bất kỳ cột mã đơn chuẩn nào, nhưng có STT / Số TT / Biển số
-                # (đặc biệt trong các bảng như BanHang dev_014 nơi STT gom nhóm các dòng cùng đơn)
+                # (khi STT gom nhóm các dòng cùng đơn)
                 fallback_order_syns = ["STT", "Số TT", "Số thứ tự", "Biển số", "Biển số xe", "IMEI"]
                 found_order = next((c for c in fallback_order_syns if c in df.columns), None)
             if found_order:
@@ -843,6 +1056,7 @@ class BusinessDataStore:
 
             # 4. Tên sản phẩm / Hàng hóa
             prod_name_syns = ["Tên sản phẩm", "Tên hàng", "Tên hàng hóa", "Mặt hàng", "Tên mặt hàng", "Tên SP", "Sản phẩm", "ten_hang"]
+            prod_name_syns = prod_name_syns + [n for n in load_lexicon().role_names("product_name") if n not in prod_name_syns]
             found_prod_name = next((c for c in prod_name_syns if c in df.columns), None)
             if found_prod_name:
                 for target in ["Tên sản phẩm", "Tên hàng", "Tên hàng hóa", "Tên SP", "Sản phẩm"]:
@@ -861,6 +1075,7 @@ class BusinessDataStore:
 
             # 6. Ngày / Thời gian
             date_syns = ["Ngày", "Thời gian", "Ngay", "NgayLap", "Ngày tạo", "Ngày đặt hàng", "Ngày bán", "Ngày lập", "Ngày mua", "NgayBan", "Thời điểm", "Date"]
+            date_syns = date_syns + [n for n in load_lexicon().role_names("date") if n not in date_syns]
             found_date = next((c for c in date_syns if c in df.columns), None)
             if found_date:
                 for target in ["Ngày", "Thời gian", "NgàyLap"]:
@@ -880,21 +1095,13 @@ class BusinessDataStore:
 
             # 7. Trạng thái đơn hàng
             status_syns = ["Trạng thái", "status_norm", "TinhTrang", "Tình trạng", "TrangThai", "Tình trạng đơn", "Trạng thái đơn hàng", "Trạng thái xử lý", "Xử lý"]
+            status_syns = status_syns + [n for n in load_lexicon().role_names("status") if n not in status_syns]
             found_status = next((c for c in status_syns if c in df.columns), None)
             if found_status:
                 for target in ["Trạng thái", "status_norm", "Tình trạng"]:
                     if target not in df.columns:
                         if target == "status_norm":
-                            def _map_st(v):
-                                s_low = str(v).lower()
-                                if any(k in s_low for k in ["hủy", "huỷ", "cancel"]):
-                                    return "Đã hủy"
-                                if any(k in s_low for k in ["trả", "tra", "return"]):
-                                    return "Trả hàng"
-                                if any(k in s_low for k in ["đang giao", "chờ", "pending"]):
-                                    return "Đang giao"
-                                return "Hoàn thành"
-                            df[target] = df[found_status].map(_map_st)
+                            df[target] = df[found_status].map(normalize_order_status)
                         else:
                             df[target] = df[found_status]
                         synthetic.add(target)
@@ -906,6 +1113,7 @@ class BusinessDataStore:
                 "TongTienHang", "tong_tien_hang", "TongThanhToan", "tong_thanh_toan", "Tổng", "Tong",
                 "Tổng cộng", "TongCong", "tiền hàng", "TienHang",
             ]
+            revenue_syns = revenue_syns + [n for n in load_lexicon().role_names("amount") if n not in revenue_syns]
             found_rev = next((c for c in revenue_syns if c in df.columns), None)
             if found_rev:
                 for target in ["Thành tiền", "revenue_norm", "Tổng tiền"]:
@@ -918,6 +1126,7 @@ class BusinessDataStore:
                 "Số lượng", "qty_base", "SL", "Sluong", "Số Lượng", "Số lượng bán",
                 "SL bán", "SLBan", "SoLuong", "Soluong", "Số lượng xuất", "SL xuất", "Số lượng lẻ", "SL lẻ"
             ]
+            qty_syns = qty_syns + [n for n in load_lexicon().role_names("quantity") if n not in qty_syns]
             found_qty = next((c for c in qty_syns if c in df.columns), None)
             if found_qty:
                 for target in ["Số lượng", "qty_base"]:
@@ -927,6 +1136,7 @@ class BusinessDataStore:
 
             # 9. Nhóm hàng / Danh mục / Loại sản phẩm
             cat_syns = ["Nhóm hàng", "Nhóm", "Nhóm hàng hóa", "Danh mục", "Nhom hang", "Loại sản phẩm", "Loại hàng hóa", "Loại hàng", "Nhóm hàng(3 Cấp)"]
+            cat_syns = cat_syns + [n for n in load_lexicon().role_names("category") if n not in cat_syns]
             found_cat = next((c for c in cat_syns if c in df.columns), None)
             if found_cat:
                 for target in ["Nhóm hàng", "Nhóm", "Nhóm hàng hóa", "Danh mục", "Loại sản phẩm"]:
@@ -1014,12 +1224,32 @@ class BusinessDataStore:
         # Nếu thư mục là preprocessed có thư mục con tables/ (chứa các file CSV đã làm sạch 100%)
         tables_sub = biz_dir / "tables"
         if tables_sub.exists() and tables_sub.is_dir():
+            # Mục 8 (bỏ dòng tổng, fill-down, bỏ dòng trùng của cùng một đơn) áp dụng cho dữ liệu nguồn csv/xlsx; nguồn sqlite
+            # là cơ sở dữ liệu quan hệ, không áp dụng (giống nhánh đọc dữ liệu gốc). Dữ liệu preprocessed bản cũ có thể
+            # chưa bỏ dòng trùng nên chạy lại ở đây (không đổi gì với dữ liệu đã sạch).
+            apply_s8 = not self._readme_sources_sqlite_only(self.get_readme(business_id))
             for file_path in sorted(tables_sub.glob("*.csv")):
                 stem = to_nfc(file_path.stem).strip()
                 df = _read_csv_robust(file_path)
                 df = normalize_dataframe_nfc(df)
+                if apply_s8:
+                    df = apply_rulebook_section8_cleaning(df)
                 raw_tables[stem] = df
+            # Dữ liệu preprocessed có thể chứa cả bảng gốc lẫn bảng gộp do bước tiền xử lý cũ sinh ra (vd bảng bán hàng
+            # theo từng tháng + bảng cả năm): giữ một bản duy nhất để không bị đếm trùng
+            before = dict(raw_tables)
+            raw_tables = self._drop_redundant_union_tables(raw_tables)
+            dropped = {n: len(before[n]) for n in before if n not in raw_tables}
+            names_before_merge = set(raw_tables)
+            raw_tables = self._merge_period_split_tables(raw_tables)
+            # Bảng gộp mới tạo từ các bảng theo kỳ mang lại tên của bảng gộp cũ đã bỏ (nếu số dòng xấp xỉ) cho dễ hiểu
+            for new_name in [n for n in raw_tables if n not in names_before_merge]:
+                cands = [(n, r) for n, r in dropped.items() if n not in raw_tables and abs(r - len(raw_tables[new_name])) <= 0.1 * max(r, 1)]
+                if cands:
+                    best = max(cands, key=lambda x: x[1])[0]
+                    raw_tables = {(best if k == new_name else k): v for k, v in raw_tables.items()}
             raw_tables = self._standardize_business_tables(raw_tables)
+            raw_tables = self._apply_base_unit_conversion(raw_tables, self.get_readme(business_id))
             return raw_tables
 
         for file_path in sorted(biz_dir.iterdir()):
@@ -1056,34 +1286,302 @@ class BusinessDataStore:
                 excel_tables = self._read_excel_smart(file_path, stem, readme_cols)
                 raw_tables.update(excel_tables)
 
-        # Gộp các bảng phân mảnh có hậu tố _1, _2, _2025, _2026 (ví dụ SoBanHang_1 + SoBanHang_2026 -> SoBanHang)
-        merged_groups: Dict[str, List[Tuple[str, pd.DataFrame]]] = {}
-        for tbl_name, df in list(raw_tables.items()):
-            m = re.match(r"^(.+?)_(\d+|202[4-9])$", tbl_name)
-            if m:
-                base_name = to_nfc(m.group(1)).strip()
-                merged_groups.setdefault(base_name, []).append((tbl_name, df))
-
-        for base_name, parts in merged_groups.items():
-            if len(parts) >= 2 and base_name not in raw_tables:
-                part_dfs = [p[1] for p in parts]
-                combined = pd.concat(part_dfs, ignore_index=True)
-                combined = apply_rulebook_section8_cleaning(combined)
-                raw_tables[base_name] = combined
-
-        # Tự động gộp các bảng bán hàng chia theo tháng thành 1 bảng `BanHang` duy nhất để truy vấn dễ dàng và siêu nhanh
-        monthly_sales: List[pd.DataFrame] = []
-        for tbl_name in list(raw_tables.keys()):
-            if re.match(r"^(BanHang_T\d+|BanHang_Thang\d+|T\d+-\d{4}|BanHang_\d{4})", tbl_name, re.I):
-                monthly_sales.append(raw_tables[tbl_name])
-        if len(monthly_sales) >= 2 and "BanHang" not in raw_tables:
-            first_cols = tuple(monthly_sales[0].columns)
-            if all(tuple(d.columns) == first_cols for d in monthly_sales):
-                comb = pd.concat(monthly_sales, ignore_index=True)
-                raw_tables["BanHang"] = apply_rulebook_section8_cleaning(comb)
+        raw_tables = self._merge_period_split_tables(raw_tables)
 
         raw_tables = self._standardize_business_tables(raw_tables)
+        raw_tables = self._apply_base_unit_conversion(raw_tables, self.get_readme(business_id))
         return raw_tables
+
+    @staticmethod
+    def _readme_sources_sqlite_only(readme: str) -> bool:
+        """README liệt kê các file nguồn dạng "- `tên` (loại)": True nếu mọi nguồn đều là sqlite."""
+        kinds = re.findall(r"^\s*-\s*`[^`]+`\s*\(([A-Za-z0-9]+)\)", readme or "", flags=re.M)
+        return bool(kinds) and all(k.lower() == "sqlite" for k in kinds)
+
+    @staticmethod
+    def _row_hashes(df: pd.DataFrame, cols: List[str]) -> "pd.Series":
+        """Băm từng dòng trên các cột chung; số được làm tròn để 3 và 3.0 cho cùng giá trị băm."""
+        parts = {}
+        for c in cols:
+            col = df[c]
+            if pd.api.types.is_numeric_dtype(col) and not pd.api.types.is_bool_dtype(col):
+                parts[c] = col.astype("float64").round(4).astype(str)
+            else:
+                parts[c] = col.astype(str).str.strip()
+        return pd.util.hash_pandas_object(pd.DataFrame(parts), index=False)
+
+    @classmethod
+    def _drop_redundant_union_tables(cls, tables: Dict[str, pd.DataFrame], min_cover: float = 0.99) -> Dict[str, pd.DataFrame]:
+        """
+        Dữ liệu preprocessed có thể chứa bảng GỘP do bước tiền xử lý cũ sinh ra (bảng cả năm, bảng theo tháng gộp các
+        năm...) bên cạnh các bảng gốc. Bảng gộp có thể sai lệch (vd có dòng trùng do gộp) và làm đếm trùng nếu giữ cả hai,
+        nên giữ lại các bảng GỐC (mịn nhất) và bỏ bảng gộp.
+
+        Nhận diện theo nội dung, không theo tên: bảng T là bảng gộp nếu >= `min_cover` các dòng (băm trên các cột chung có
+        dữ liệu) của T nằm trong hợp các bảng NHỎ HƠN cùng cấu trúc, và các bảng nhỏ đó có tổng số dòng đủ lớn để chứa T.
+        Duyệt từ bảng lớn đến nhỏ; bảng đã bị bỏ không còn được tính là nguồn.
+        """
+        def _nonempty_cols(df: pd.DataFrame) -> Dict[str, str]:
+            return {str(c).lower().strip(): c for c in df.columns if not str(c).startswith("_") and df[c].notna().any()}
+
+        names = sorted([n for n, d in tables.items() if len(d) >= 2], key=lambda n: -len(tables[n]))
+        meta = {n: _nonempty_cols(tables[n]) for n in names}
+        hash_cache: Dict[Tuple[str, Tuple[str, ...]], set] = {}
+
+        def _hashes(name: str, cols: Tuple[str, ...]) -> set:
+            key = (name, cols)
+            if key not in hash_cache:
+                sub = tables[name][[meta[name][c] for c in cols]]
+                sub.columns = list(cols)
+                hash_cache[key] = set(cls._row_hashes(sub, list(cols)).tolist())
+            return hash_cache[key]
+
+        removed: set = set()
+        for t in names:
+            parts_rows = 0
+            n_parts = 0
+            for sm in names:
+                if sm == t or sm in removed or len(tables[sm]) >= len(tables[t]):
+                    continue
+                common = sorted(set(meta[t]) & set(meta[sm]))
+                # bảng nhỏ phải cùng cấu trúc với bảng lớn: gần như mọi cột có dữ liệu của nó đều có ở bảng lớn
+                if len(common) < 3 or len(common) < 0.8 * len(meta[sm]):
+                    continue
+                # So khớp trên cột SỐ / NGÀY / MÃ (ổn định); bỏ cột chữ tự do vì bước gộp bảng có thể đã chuẩn hoá lại
+                # cách viết tên hàng/tên khách ở bảng gộp
+                key_cols = [
+                    c for c in common
+                    if pd.api.types.is_numeric_dtype(tables[sm][meta[sm][c]])
+                    or re.search(r"ngày|ngay|thời gian|date|mã|ma_|id|stt|imei|số phiếu", c)
+                ]
+                if len(key_cols) < 3:
+                    continue
+                cols = tuple(key_cols)
+                small_h = _hashes(sm, cols)
+                if small_h and len(small_h & _hashes(t, cols)) / len(small_h) >= min_cover:
+                    parts_rows += len(tables[sm])
+                    n_parts += 1
+            # T là bản gộp nếu có >= 2 bảng nhỏ cùng cấu trúc nằm gọn trong T và tổng số dòng của chúng đủ chứa T
+            if n_parts >= 2 and parts_rows >= 0.9 * len(tables[t]):
+                removed.add(t)
+        return {n: d for n, d in tables.items() if n not in removed}
+
+    _PERIOD_TOKEN_RE = re.compile(
+        r"(?:(?<=^)|(?<=[_\-\s]))(?:t|th|thg|thang|tháng|q|quy|quý|nam|năm|dot|đợt|ky|kỳ)?\s*\d{1,4}(?:[_\-]\d{2,4})?(?=$|[_\-\s])",
+        re.I,
+    )
+
+    @classmethod
+    def _merge_period_split_tables(cls, raw_tables: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+        """
+        Gộp các bảng cùng cấu trúc bị chia theo kỳ/đợt (tên chỉ khác phần số: "X_1"/"X_2", "X_T1".."X_T12",
+        "X_2025"/"X_2026", "T1-2025"...). Nhận diện theo tên bỏ phần kỳ + độ giống cột, không theo tên bảng cụ thể.
+        Bảng mảnh được thay bằng bảng gộp (cột `_source_table` giữ nguồn).
+        """
+        def _jaccard(a: pd.Index, b: pd.Index) -> float:
+            s1 = {str(c).lower().strip() for c in a if not str(c).startswith("_")}
+            s2 = {str(c).lower().strip() for c in b if not str(c).startswith("_")}
+            return len(s1 & s2) / len(s1 | s2) if s1 and s2 else 0.0
+
+        groups: Dict[str, List[str]] = {}
+        for name in raw_tables:
+            base = cls._PERIOD_TOKEN_RE.sub("", to_nfc(name)).strip(" _-")
+            if base != to_nfc(name).strip(" _-"):
+                groups.setdefault(base, []).append(name)
+
+        out = dict(raw_tables)
+        for base, names in groups.items():
+            if len(names) < 2:
+                continue
+            ref = raw_tables[names[0]].columns
+            members = [n for n in names if _jaccard(ref, raw_tables[n].columns) >= 0.70]
+            if len(members) < 2:
+                continue
+            target = base if base and base not in raw_tables else f"{base or 'bang'}_gop"
+            parts = []
+            for n in members:
+                part = raw_tables[n].copy()
+                part["_source_table"] = n
+                parts.append(part)
+                out.pop(n, None)
+            out[target] = apply_rulebook_section8_cleaning(pd.concat(parts, ignore_index=True))
+        return out
+
+    # ------------------------------------------------------------------
+    # Quy đổi về đơn vị cơ bản (Rulebook Mục 3 "Bán chạy", Mục 10 "Đơn vị cơ bản, đơn vị lớn")
+    # ------------------------------------------------------------------
+    _UNIT_COL_HINTS = ("đvt", "dvt", "đơn vị", "don vi", "don_vi", "unit", "đ.vị")
+    _FACTOR_COL_HINTS = ("hệ số", "he so", "he_so", "quy đổi", "quy doi", "quy_doi", "factor", "số lượng quy", "sl quy", "quy cách")
+    _FACTOR_COL_EXCLUDE = ("chiết khấu", "giảm", "thuế", "vat", "điểm", "%", "giá", "tiền")
+    _PROD_NAME_COLS = ("tên hàng", "tên sản phẩm", "tên hàng hóa", "tên mặt hàng", "mặt hàng", "sản phẩm", "hàng hóa", "tên thuốc", "món", "ten_hang", "tên sp")
+    _PROD_CODE_COLS = ("mã hàng", "mã sản phẩm", "mã sp", "mã hàng hóa", "mã thuốc", "sku", "mahang", "masp", "ma_sp", "mã mặt hàng")
+    _QTY_COLS = ("số lượng", "sl", "so_luong", "soluong", "số lượng bán", "sl bán", "số lượng nhập", "sl nhập", "số lượng xuất")
+
+    @classmethod
+    def _find_col(cls, df: pd.DataFrame, names: Tuple[str, ...]) -> Optional[str]:
+        low = {str(c).lower().strip(): c for c in df.columns}
+        for n in names:
+            if n in low:
+                return low[n]
+        return None
+
+    @staticmethod
+    def parse_readme_unit_conversions(readme: str) -> Dict[Tuple[Optional[str], str], Tuple[float, str, Optional[str]]]:
+        """
+        Đọc các dòng quy đổi trong README: "- Bia Tiger: 1 thùng = 4 lốc, 1 lốc = 6 lon" hoặc "1 thùng = 24 lon".
+        Trả về {(khóa tên mặt hàng | None nếu áp chung, đơn vị lớn): (hệ số, đơn vị nhỏ hơn)}.
+        """
+        conv: Dict[Tuple[Optional[str], str], Tuple[float, str, Optional[str]]] = {}
+        if not readme:
+            return conv
+        pair_pat = re.compile(r"1\s+([^\d=,;:()\n]+?)\s*=\s*(\d+(?:[.,]\d+)?)\s+([^\d=,;:()\n.]+)", re.I)
+        for line in to_nfc(readme).splitlines():
+            pairs = list(pair_pat.finditer(line))
+            if not pairs:
+                continue
+            head = line[: pairs[0].start()]
+            item = re.sub(r"^[\s\-*•]+|\*\*", "", head).strip().rstrip(":").strip()
+            item_key = _accent_strip_key(item) if item else None
+            for m in pairs:
+                big = _accent_strip_key(m.group(1))
+                small = _accent_strip_key(m.group(3))
+                try:
+                    factor = float(m.group(2).replace(",", "."))
+                except ValueError:
+                    continue
+                if big and small and big != small and factor > 0:
+                    conv[(item_key, big)] = (factor, small, to_nfc(m.group(3)).strip())
+        return conv
+
+    @classmethod
+    def _conversions_from_tables(cls, tables: Dict[str, pd.DataFrame]) -> Tuple[Dict[Tuple[Optional[str], str], Tuple[float, str, Optional[str]]], set]:
+        """Bảng quy đổi / danh mục có cột hệ số: (mã hoặc tên hàng, đơn vị lớn) -> (hệ số, đơn vị cơ bản)."""
+        conv: Dict[Tuple[Optional[str], str], Tuple[float, str, Optional[str]]] = {}
+        conv_tables: set = set()
+        for tname, df in tables.items():
+            factor_col = next(
+                (c for c in df.columns if any(h in str(c).lower() for h in cls._FACTOR_COL_HINTS)
+                 and not any(x in str(c).lower() for x in cls._FACTOR_COL_EXCLUDE)
+                 and pd.api.types.is_numeric_dtype(df[c])),
+                None,
+            )
+            # Bảng quy đổi / danh mục không ghi theo đơn và không có cột ngày giao dịch
+            is_transactional = any(c in ORDER_ID_CANDIDATES for c in df.columns) or any(
+                any(k in str(c).lower() for k in ("ngày", "thời gian", "date")) for c in df.columns
+            )
+            if factor_col is None or is_transactional:
+                continue
+            unit_cols = [c for c in df.columns if any(h in str(c).lower() for h in cls._UNIT_COL_HINTS)]
+            big_col = next((c for c in unit_cols if any(k in str(c).lower() for k in ("lớn", "lon", "quy đổi", "quy doi", "đóng gói"))), None)
+            base_col = next((c for c in unit_cols if any(k in str(c).lower() for k in ("cơ bản", "co ban", "nhỏ", "lẻ", "le"))), None)
+            if big_col is None:
+                big_col = next((c for c in unit_cols if c != base_col), None)
+            key_cols = [c for c in (cls._find_col(df, cls._PROD_CODE_COLS), cls._find_col(df, cls._PROD_NAME_COLS)) if c]
+            if big_col is None or not key_cols:
+                continue
+            for _, row in df.iterrows():
+                big = row.get(big_col)
+                f = row.get(factor_col)
+                if not isinstance(big, str) or pd.isna(f) or float(f) <= 0:
+                    continue
+                small = row.get(base_col) if base_col else None
+                small_key = _accent_strip_key(small) if isinstance(small, str) else "__base__"
+                small_disp = to_nfc(small).strip() if isinstance(small, str) else None
+                for kc in key_cols:
+                    kv = row.get(kc)
+                    if isinstance(kv, str) and kv.strip():
+                        conv[(_accent_strip_key(kv), _accent_strip_key(big))] = (float(f), small_key, small_disp)
+            conv_tables.add(tname)
+        return conv, conv_tables
+
+    @classmethod
+    def _apply_base_unit_conversion(cls, tables: Dict[str, pd.DataFrame], readme: str) -> Dict[str, pd.DataFrame]:
+        """
+        Mục 10: hệ số quy đổi đọc ở bảng quy đổi hoặc README; đơn vị không có dòng quy đổi là đơn vị cơ bản (hệ số 1).
+        Với mọi bảng có (mặt hàng, đơn vị, số lượng) và chưa có cột số lượng cơ bản ghi sẵn:
+          qty_base = số lượng × hệ số (hỗ trợ nhiều cấp: thùng -> lốc -> lon), thêm cột "Đơn vị cơ bản".
+        """
+        conv, conv_tables = cls._conversions_from_tables(tables)
+        conv.update({k: v for k, v in cls.parse_readme_unit_conversions(readme).items() if k not in conv})
+        if not conv:
+            return tables
+        explicit_base_names = {"sl lẻ", "số lượng lẻ", "quy ra đv lẻ", "sl quy đổi", "số lượng quy đổi", "sl cơ bản", "số lượng cơ bản", "quy_ra_dv_le"}
+
+        def _resolve(keys: List[str], unit_key: str) -> Tuple[float, Optional[str]]:
+            """Hệ số về đơn vị cơ bản và tên đơn vị cơ bản (None = không biết tên, chỉ biết hệ số)."""
+            factor, u, disp = 1.0, unit_key, ""
+            for _ in range(6):
+                hit = next((conv[(k, u)] for k in keys if (k, u) in conv), None) or conv.get((None, u))
+                if hit is None or hit[1] == u:
+                    break
+                factor *= hit[0]
+                disp = hit[2]
+                if hit[1] == "__base__":
+                    break
+                u = hit[1]
+            return factor, (disp if factor != 1.0 else "")
+
+        for tname, df in tables.items():
+            if tname in conv_tables:
+                continue
+            if any(str(c).lower().strip() in explicit_base_names for c in df.columns):
+                continue
+            unit_col = next((c for c in df.columns if any(h in str(c).lower() for h in cls._UNIT_COL_HINTS)
+                             and not any(k in str(c).lower() for k in ("giá", "gia", "cơ bản"))), None)
+            qty_col = cls._find_col(df, cls._QTY_COLS)
+            key_cols = [c for c in (cls._find_col(df, cls._PROD_CODE_COLS), cls._find_col(df, cls._PROD_NAME_COLS)) if c]
+            if unit_col is None or qty_col is None or not key_cols or not pd.api.types.is_numeric_dtype(df[qty_col]):
+                continue
+            factors: List[float] = []
+            base_units: List[Any] = []
+            for _, row in df[key_cols + [unit_col]].iterrows():
+                unit = row[unit_col]
+                if not isinstance(unit, str) or not unit.strip():
+                    factors.append(1.0)
+                    base_units.append(unit)
+                    continue
+                keys = [_accent_strip_key(row[k]) for k in key_cols if isinstance(row[k], str)]
+                f, base_name = _resolve(keys, _accent_strip_key(unit))
+                factors.append(f)
+                base_units.append(unit if f == 1.0 else base_name)
+            if any(f != 1.0 for f in factors):
+                df["qty_base"] = df[qty_col].astype(float) * pd.Series(factors, index=df.index)
+                if "Đơn vị cơ bản" not in df.columns:
+                    df["Đơn vị cơ bản"] = base_units
+        return tables
+
+    @classmethod
+    def _spelling_canon_map(cls, values: List[str], preferred: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        """
+        Gộp các cách viết của CÙNG một tên (Mục 3, 8): khác hoa/thường, khoảng trắng, dấu câu; hoặc bản gõ
+        không dấu ("banh mi bo") khi chỉ có DUY NHẤT một bản có dấu tương ứng.
+        KHÔNG gộp hai bản khác dấu ("Bánh mì bơ" vs "Bánh mì bò", "Anh Bảo" vs "Anh Bào"): khác dấu là khác chữ.
+        Trả về {giá trị gốc: tên chuẩn} chỉ cho các giá trị cần đổi.
+        """
+        preferred = preferred or {}
+        groups: Dict[str, List[str]] = {}
+        for v in values:
+            groups.setdefault(_strict_name_key(v), []).append(v)
+        for sk in preferred:
+            groups.setdefault(sk, [])
+        canon: Dict[str, str] = {
+            sk: preferred.get(sk) or cls._choose_best_canonical_spelling(vs) for sk, vs in groups.items()
+        }
+        accented_by_ascii: Dict[str, set] = {}
+        for sk in groups:
+            if not sk.isascii():
+                accented_by_ascii.setdefault(_accent_strip_key(sk), set()).add(sk)
+        out: Dict[str, str] = {}
+        for sk, vs in groups.items():
+            target = canon[sk]
+            if sk.isascii():
+                cands = accented_by_ascii.get(_accent_strip_key(sk), set())
+                if len(cands) == 1:
+                    target = canon[next(iter(cands))]
+            for v in set(vs):
+                if v != target:
+                    out[v] = target
+        return out
 
     @staticmethod
     def _choose_best_canonical_spelling(values: List[str]) -> str:
@@ -1109,22 +1607,12 @@ class BusinessDataStore:
         1. Chuẩn hóa tên mặt hàng (gộp các cách viết hoa/thường/thiếu dấu/khoảng trắng về tên chuẩn trong Danh mục).
         2. Chuẩn hóa tên khách lẻ ('kl', 'khách lẻ', 'khach le' -> 'Khách lẻ') và gộp cách viết tên khách ở shop không có mã khách.
         3. Chuẩn hóa ngày đặt của đơn nhiều dòng về min(ngày) của đơn đó, và lan truyền trạng thái 'Trả hàng'
-           cho mọi dòng/bảng của đơn có trả hàng (kể cả trả 1 phần: Số lượng < 0, Số lượng trả > 0, bảng tra_hang).
+           cho mọi dòng/bảng của đơn có trả hàng (kể cả trả 1 phần: Số lượng < 0, Số lượng trả > 0, bảng phiếu trả hàng).
         4. Bổ sung (denormalize) các cột tra cứu phổ biến (Thời gian, Trạng thái, Tên hàng, Hoạt chất, Thuốc kê đơn, Thành tiền)
            vào bảng chi tiết để tránh lỗi KeyError khi truy vấn trên 1 bảng.
         """
         # 1. Thu thập tên mặt hàng chuẩn từ các bảng danh mục / tồn kho (nếu có)
         catalog_name_map: Dict[str, str] = {}
-        catalog_table_names = (
-            "DanhSachSanPham",
-            "Danh sách hàng hóa",
-            "DanhMuc",
-            "BanHang_HangHoa",
-            "san_pham",
-            "BaoCaoTonKho",
-            "TonKho",
-            "ton_kho",
-        )
         prod_col_candidates = (
             "Tên hàng",
             "Tên sản phẩm",
@@ -1141,20 +1629,25 @@ class BusinessDataStore:
             "ten_sp",
             "TenHang",
         )
-        for cat_tbl in catalog_table_names:
-            if cat_tbl in tables:
-                df_cat = tables[cat_tbl]
+        # Bảng danh mục nhận theo CẤU TRÚC (không theo tên bảng cụ thể): có cột tên hàng, không có cột mã đơn,
+        # và tên hàng gần như không lặp (mỗi dòng một mặt hàng)
+        def _is_catalog(df_cat: pd.DataFrame) -> bool:
+            if any(c in ORDER_ID_CANDIDATES for c in df_cat.columns):
+                return False
+            pc = next((c for c in prod_col_candidates if c in df_cat.columns and df_cat[c].dtype == object), None)
+            if pc is None:
+                return False
+            vals = df_cat[pc].dropna()
+            return len(vals) > 0 and vals.nunique() >= 0.9 * len(vals)
+
+        for cat_tbl, df_cat in tables.items():
+            if _is_catalog(df_cat):
                 for pcol in prod_col_candidates:
                     if pcol in df_cat.columns and df_cat[pcol].dtype == object:
                         for v in df_cat[pcol].dropna().astype(str):
                             v_clean = to_nfc(v)
                             if v_clean:
-                                k = _accent_strip_key(v_clean)
-                                prev = catalog_name_map.get(k)
-                                if prev is None or (
-                                    any(ord(ch) > 127 for ch in v_clean) and not any(ord(ch) > 127 for ch in prev)
-                                ):
-                                    catalog_name_map[k] = v_clean
+                                catalog_name_map.setdefault(_strict_name_key(v_clean), v_clean)
 
         # Áp dụng chuẩn hóa tên mặt hàng và khách hàng trên mọi bảng
         cust_col_candidates = (
@@ -1178,19 +1671,9 @@ class BusinessDataStore:
                     non_null_vals = [str(x) for x in df[pcol].dropna().tolist() if str(x).strip()]
                     if not non_null_vals:
                         continue
-                    by_key: Dict[str, List[str]] = {}
-                    for v in non_null_vals:
-                        by_key.setdefault(_accent_strip_key(v), []).append(v)
-                    col_canon_map: Dict[str, str] = {}
-                    for k, vs in by_key.items():
-                        if k in catalog_name_map:
-                            col_canon_map[k] = catalog_name_map[k]
-                        elif len(set(vs)) > 1:
-                            col_canon_map[k] = cls._choose_best_canonical_spelling(vs)
+                    col_canon_map = cls._spelling_canon_map(non_null_vals, preferred=catalog_name_map)
                     if col_canon_map:
-                        df[pcol] = df[pcol].map(
-                            lambda x: col_canon_map.get(_accent_strip_key(x), x) if isinstance(x, str) else x
-                        )
+                        df[pcol] = df[pcol].map(lambda x: col_canon_map.get(x, x) if isinstance(x, str) else x)
 
             # Chuẩn hóa cột tên khách hàng
             has_cust_id = any(cid in df.columns for cid in cust_id_candidates)
@@ -1199,32 +1682,41 @@ class BusinessDataStore:
                     non_null_vals = [str(x) for x in df[ccol].dropna().tolist() if str(x).strip()]
                     if not non_null_vals:
                         continue
-                    by_key_c: Dict[str, List[str]] = {}
-                    for v in non_null_vals:
-                        by_key_c.setdefault(_accent_strip_key(v), []).append(v)
-                    cust_canon_map: Dict[str, str] = {}
-                    for k, vs in by_key_c.items():
-                        if k in walkin_keys:
-                            cust_canon_map[k] = "Khách lẻ"
-                        elif not has_cust_id and len(set(vs)) > 1:
-                            cust_canon_map[k] = cls._choose_best_canonical_spelling(vs)
+                    cust_canon_map: Dict[str, str] = {
+                        v: "Khách lẻ" for v in set(non_null_vals) if _accent_strip_key(v) in walkin_keys and v != "Khách lẻ"
+                    }
+                    if not has_cust_id:
+                        named = [v for v in non_null_vals if _accent_strip_key(v) not in walkin_keys]
+                        cust_canon_map.update(cls._spelling_canon_map(named))
                     if cust_canon_map:
-                        df[ccol] = df[ccol].map(
-                            lambda x: cust_canon_map.get(_accent_strip_key(x), x) if isinstance(x, str) else x
-                        )
+                        df[ccol] = df[ccol].map(lambda x: cust_canon_map.get(x, x) if isinstance(x, str) else x)
 
         # 2. Thu thập danh sách mã đơn có trả hàng (từ bảng lô, bảng trả hàng, dòng số lượng âm, hoặc dòng trạng thái Trả hàng)
         returned_order_ids: set = set()
         all_order_id_cols = set(ORDER_ID_CANDIDATES) | {"Order ID", "MaDon", "ma_don"}
 
-        if "tra_hang" in tables and "MaDon" in tables["tra_hang"].columns:
-            returned_order_ids.update(tables["tra_hang"]["MaDon"].dropna().astype(str).tolist())
+        # Bảng phiếu trả hàng (nhận theo từ vựng trong tên bảng): mọi mã đơn gốc trong đó là đơn có trả hàng
+        returns_ids: set = set()
+        for tbl_name, df in tables.items():
+            if not re.search(r"tra hang|trahang|tra lai|hoan hang|doi tra|return", _accent_strip_key(tbl_name).replace("_", " ")):
+                continue
+            ref_col = next(
+                (c for c in df.columns
+                 if re.search(r"ma ?don|ma ?hd|so ?hd|hoa don|order", _accent_strip_key(c).replace("_", " "))
+                 and not re.search(r"phieu|tra", _accent_strip_key(c))),
+                None,
+            )
+            if ref_col is not None:
+                returns_ids.update(df[ref_col].dropna().astype(str))
+        returned_order_ids.update(returns_ids)
 
+        return_source_ids: set = set()
         for tbl_name, df in tables.items():
             ord_col = next((c for c in df.columns if c in all_order_id_cols), None)
             if not ord_col:
                 continue
-            # Kiểm tra cột số lượng trả > 0 (trong DanhSachHoaDonChiTietLo, DonHang_Lo, BanHang_BanTheoLo)
+            n_before = len(returned_order_ids)
+            # Kiểm tra cột số lượng trả > 0
             for c in df.columns:
                 cl = c.lower()
                 if ("lượng trả" in cl or "sl trả" in cl) and pd.api.types.is_numeric_dtype(df[c]):
@@ -1237,6 +1729,9 @@ class BusinessDataStore:
                 elif cl in ORDER_STATUS_COL_NAMES and df[c].dtype == object:
                     st_ret_ids = df.loc[df[c] == "Trả hàng", ord_col].dropna().astype(str).tolist()
                     returned_order_ids.update(st_ret_ids)
+            if len(returned_order_ids) > n_before:
+                return_source_ids.update(df[ord_col].dropna().astype(str))
+        return_source_ids.update(returns_ids)
 
         # Áp dụng chuẩn hóa ngày đặt (min date của đơn) và trạng thái 'Trả hàng' cho các đơn trong returned_order_ids
         order_date_col_candidates = ("Ngày giao dịch", "Ngày lập", "Ngày đặt hàng", "Ngày bán", "Ngày", "ngay_ban", "Thời gian", "Ngày mua")
@@ -1269,24 +1764,12 @@ class BusinessDataStore:
                     df["Thời gian"] = df[detailed_dt]
 
             # Tạo alias cột trạng thái chuẩn ('Trạng thái') trên mọi bảng có cột trạng thái
-            st_found = next(
-                (c for c in df.columns if c.lower().strip() in ORDER_STATUS_COL_NAMES or any(c.lower().strip().startswith(p) for p in ["trạng thái", "trang thai", "tt đơn", "tình trạng", "ghi chú tt"])),
-                None
-            )
+            st_found = pick_order_status_col(df)
             if st_found and "Trạng thái" not in df.columns:
                 df["Trạng thái"] = df[st_found]
 
-            if "Trạng thái" in df.columns and "status_norm" not in df.columns:
-                def _norm_status_val(v: Any) -> str:
-                    s = str(v).lower().strip()
-                    if any(k in s for k in ["hủy", "huỷ", "cancel"]):
-                        return "Đã hủy"
-                    if any(k in s for k in ["trả", "tra hang", "return"]):
-                        return "Trả hàng"
-                    if any(k in s for k in ["hoàn thành", "thành công", "xong", "đã lấy", "completed", "finish"]):
-                        return "Hoàn thành"
-                    return str(v)
-                df["status_norm"] = df["Trạng thái"].map(_norm_status_val)
+            if "status_norm" not in df.columns and (st_found or "Trạng thái" in df.columns):
+                df["status_norm"] = df[st_found or "Trạng thái"].map(normalize_order_status)
 
             # 2c. Tạo alias cột tên sản phẩm chuẩn ('Tên hàng')
             if "Tên hàng" not in df.columns:
@@ -1327,7 +1810,7 @@ class BusinessDataStore:
                     (c for c in df.columns if any(c.lower().strip() == p for p in [
                         "tien hang", "tiền hàng", "thành tiền", "thanh tien", "thanh_tien", "thanhtien",
                         "thành tiền (đ)", "amount", "tổng tiền hàng", "tongtienhang", "tong_tien_hang",
-                        "trigia", "tri_gia", "trị giá", "tongthanhtoan", "tong_thanh_toan", "tổng thanh toán",
+                        "trigia", "tri_gia", "trị giá",
                     ])),
                     None
                 )
@@ -1338,6 +1821,8 @@ class BusinessDataStore:
                         (c for c in df.columns if any(c.lower().strip() == p for p in [
                             "tổng tiền", "tongtien", "tongcong", "tổng cộng", "tiền", "thành tiền",
                             "tổng", "tong", "tổng đơn", "tong_don", "tổng bill", "tong_bill",
+                            # "Tổng thanh toán" gồm VAT/phí ship, đã trừ giảm giá cả đơn -> chỉ dùng khi không còn cột nào khác
+                            "tongthanhtoan", "tong_thanh_toan", "tổng thanh toán",
                         ])),
                         None
                     )
@@ -1347,13 +1832,17 @@ class BusinessDataStore:
             ord_col = next((c for c in df.columns if c in all_order_id_cols), None)
             if not ord_col:
                 continue
-            # Nếu bảng có nhiều dòng trên cùng 1 mã đơn và có cột ngày đặt + cột trạng thái đơn (như SoBanHang ở biz_105, biz_117)
+            # Nếu bảng có nhiều dòng trên cùng 1 mã đơn và có cột ngày đặt + cột trạng thái đơn 
             st_col = next((c for c in df.columns if c.lower().strip() in ORDER_STATUS_COL_NAMES), None)
             dt_col = next((c for c in df.columns if c in order_date_col_candidates), None)
             if dt_col and st_col and not df[ord_col].is_unique and df[dt_col].dtype == object:
                 min_dates = df.groupby(ord_col, sort=False)[dt_col].min()
                 df[dt_col] = df[ord_col].map(min_dates).fillna(df[dt_col])
-            if st_col and returned_order_ids:
+            # Chỉ lan truyền sang bảng cùng "không gian mã đơn" với bảng phát hiện trả hàng (header/chi tiết của cùng đơn),
+            # không sang phiếu nhập/phiếu chi chỉ vì trùng số mã ("15" của phiếu nhập khác đơn bán "15")
+            tbl_ids = set(df[ord_col].dropna().astype(str))
+            same_space = bool(tbl_ids) and len(tbl_ids & return_source_ids) >= 0.5 * len(tbl_ids)
+            if st_col and returned_order_ids and same_space:
                 # Chỉ cập nhật những đơn chưa phải 'Đã hủy' sang 'Trả hàng'
                 mask_ret = df[ord_col].astype(str).isin(returned_order_ids) & (df[st_col] != "Đã hủy")
                 if mask_ret.any():
@@ -1457,16 +1946,7 @@ class BusinessDataStore:
         # Đảm bảo mọi bảng có 'Trạng thái' đều có 'status_norm', và mọi bảng có 'Ngày' đều có 'Thời gian'
         for tbl_name, df in tables.items():
             if "Trạng thái" in df.columns and "status_norm" not in df.columns:
-                def _norm_st(v: Any) -> str:
-                    s = str(v).lower().strip()
-                    if any(k in s for k in ["hủy", "huỷ", "cancel"]):
-                        return "Đã hủy"
-                    if any(k in s for k in ["trả", "tra hang", "return"]):
-                        return "Trả hàng"
-                    if any(k in s for k in ["hoàn thành", "thành công", "xong", "đã lấy", "completed", "finish", "hoàn tất", "hoan tat"]):
-                        return "Hoàn thành"
-                    return str(v)
-                df["status_norm"] = df["Trạng thái"].map(_norm_st)
+                df["status_norm"] = df["Trạng thái"].map(normalize_order_status)
             if "Ngày" in df.columns and "Thời gian" not in df.columns:
                 df["Thời gian"] = df["Ngày"]
 
@@ -1590,7 +2070,7 @@ class BusinessDataStore:
         - Nếu chỉ có 1 sheet -> trả về {file_stem: df}.
         - Nếu có nhiều sheet cùng cấu trúc cột (chia theo tháng) -> gộp thành 1 bảng {file_stem: df_merged},
           kèm xử lý điền năm từ tên sheet cho cột ngày không ghi năm.
-        - Nếu các sheet có cấu trúc cột khác nhau (như DuLieuBanHang.xlsx, Bao_cao_ban_hang.xlsx, DuLieuXuat.xlsx)
+        - Nếu các sheet có cấu trúc cột khác nhau 
           -> tách mỗi sheet thành một bảng riêng {sheet_name: df}.
         """
         xl = pd.ExcelFile(xlsx_path)
@@ -1627,37 +2107,32 @@ class BusinessDataStore:
                 return 0.0
             return len(s1 & s2) / len(s1 | s2)
 
-        ref_cols = sheet_dfs[0][1].columns
-        similar_to_first = [
-            (s_name, df)
-            for s_name, df in sheet_dfs
-            if _schema_jaccard(ref_cols, df.columns) >= 0.70
-        ]
-        dissimilar_sheets = [
-            (s_name, df)
-            for s_name, df in sheet_dfs
-            if _schema_jaccard(ref_cols, df.columns) < 0.70
-        ]
+        # Gom các sheet cùng cấu trúc thành cụm (không phụ thuộc thứ tự sheet: "Danh mục" đứng đầu rồi 12 sheet tháng
+        # vẫn gộp đủ 12 tháng). Cụm >= 2 sheet (phân mảnh theo tháng/đợt) -> một bảng; sheet lẻ giữ bảng riêng.
+        clusters: List[List[Tuple[str, pd.DataFrame]]] = []
+        for s_name, df in sheet_dfs:
+            for cl in clusters:
+                if _schema_jaccard(cl[0][1].columns, df.columns) >= 0.70:
+                    cl.append((s_name, df))
+                    break
+            else:
+                clusters.append([(s_name, df)])
 
         out: Dict[str, pd.DataFrame] = {}
-        # Nếu từ 2 sheet trở lên có cùng cấu trúc phân mảnh (như 12 tháng hoặc các đợt bán hàng) -> gộp thành master table
-        if len(similar_to_first) >= 2 and len(similar_to_first) >= len(dissimilar_sheets):
+        multi = [cl for cl in clusters if len(cl) >= 2]
+        for cl in clusters:
+            if len(cl) == 1:
+                s_name, df = cl[0]
+                out[s_name] = apply_rulebook_section8_cleaning(df)
+                continue
             annotated_dfs: List[pd.DataFrame] = []
-            for s_name, df in similar_to_first:
+            for s_name, df in cl:
                 df_copy = df.copy()
                 df_copy["_sheet_name"] = s_name
                 annotated_dfs.append(df_copy)
-            merged_df = pd.concat(annotated_dfs, ignore_index=True)
-            merged_df = apply_rulebook_section8_cleaning(merged_df)
-            out[file_stem] = merged_df
-            # Các sheet có schema hoàn toàn khác (như Danh mục hàng, Bảng giá) giữ nguyên thành bảng riêng
-            for s_name, df in dissimilar_sheets:
-                out[s_name] = apply_rulebook_section8_cleaning(df)
-            return out
-
-        # Các sheet là các bảng nghiệp vụ khác nhau
-        for s_name, df in sheet_dfs:
-            out[s_name] = apply_rulebook_section8_cleaning(df)
+            merged_df = apply_rulebook_section8_cleaning(pd.concat(annotated_dfs, ignore_index=True))
+            name = file_stem if len(multi) == 1 else f"{file_stem}_{cl[0][0]}"
+            out[name] = merged_df
         return out
 
     def create_duckdb_connection(self, business_id: str) -> Tuple[duckdb.DuckDBPyConnection, Dict[str, pd.DataFrame]]:
@@ -1679,42 +2154,18 @@ class BusinessDataStore:
         Tạo Compact Schema Metadata + nội dung README.md của shop để đưa vào Prompt của LLM.
         Đảm bảo tổng độ dài gọn gàng (nằm gọn trong giới hạn 8192 token của vLLM cả khi retry).
         """
+        # README giữ nguyên (không lọc theo câu hỏi) để phần đầu schema của một shop giống hệt nhau giữa các câu
+        # -> vLLM dùng lại prefix cache. Quy đổi đơn vị đã được áp vào cột qty_base khi nạp dữ liệu.
         readme_text = self.get_readme(business_id).strip()
-        # Nếu README có danh sách quy đổi đơn vị, chỉ giữ các dòng khớp từ khóa câu hỏi + 3 dòng mẫu
-        readme_lines = readme_text.splitlines()
-        if question and any("**Quy đổi đơn vị**" in ln for ln in readme_lines):
-            q_words = [w for w in re.split(r"\W+", question.lower()) if len(w) >= 2]
-            filtered_readme: List[str] = []
-            in_conv = False
-            conv_kept = 0
-            for ln in readme_lines:
-                if "**Quy đổi đơn vị**" in ln:
-                    in_conv = True
-                    filtered_readme.append(ln)
-                    continue
-                if in_conv and ln.strip().startswith("- ") and not ln.strip().startswith("- **"):
-                    ln_low = ln.lower()
-                    if any(w in ln_low for w in q_words) or conv_kept < 2:
-                        filtered_readme.append(ln)
-                        conv_kept += 1
-                else:
-                    if in_conv and ln.strip().startswith("- **"):
-                        in_conv = False
-                    filtered_readme.append(ln)
-            readme_text = "\n".join(filtered_readme)
 
         tables = self.load_tables(business_id)
 
-        # Nếu đã có bảng gộp (ví dụ SoBanHang từ SoBanHang_1 + SoBanHang_2026, hoặc BanHang gộp từ các tháng), ẩn các bảng mảnh trong prompt
+        # Bảng mảnh theo kỳ đã được thay bằng bảng gộp khi nạp; ẩn thêm mảnh "X_n" nếu bảng gốc "X" cùng tồn tại
         part_names_to_hide = set()
         for tbl_name in tables:
-            m = re.match(r"^(.+?)_(\d+|202[4-9])$", tbl_name)
+            m = re.match(r"^(.+?)_(\d+)$", tbl_name)
             if m and m.group(1).strip() in tables:
                 part_names_to_hide.add(tbl_name)
-        if "BanHang" in tables:
-            for tbl_name in tables:
-                if re.match(r"^(BanHang_T\d+|BanHang_Thang\d+|T\d+-\d{4}|BanHang_\d{4})", tbl_name, re.I):
-                    part_names_to_hide.add(tbl_name)
 
         if len(readme_text) > 2400:
             readme_text = readme_text[:2400] + "\n...(xem thêm trong tài liệu shop)"
@@ -1749,36 +2200,47 @@ class BusinessDataStore:
             return "BẢNG DỮ LIỆU HOẠT ĐỘNG"
 
         def _infer_col_type(col_name: str, series: pd.Series) -> str:
-            c_low = col_name.lower()
-            if any(k in c_low for k in ["ngày", "ngay", "thời gian", "date", "hạn dùng", "hsd"]):
-                return "TIMESTAMP"
-            if any(k in c_low for k in ["tiền", "tien", "giá", "gia", "doanh thu", "dthu", "lãi", "nợ", "chiết khấu"]):
+            # Khai báo đúng kiểu vật lý trong DuckDB (cột ngày là chuỗi ISO, không phải TIMESTAMP)
+            if pd.api.types.is_float_dtype(series):
                 return "DOUBLE"
-            if any(k in c_low for k in ["số lượng", "so luong", "qty", "tồn", "ton"]):
-                return "DOUBLE"
-            if series.dtype in ["float64", "float32"]:
-                return "DOUBLE"
-            if series.dtype in ["int64", "int32"]:
+            if pd.api.types.is_integer_dtype(series):
                 return "BIGINT"
+            if pd.api.types.is_bool_dtype(series):
+                return "BOOLEAN"
             non_null = series.dropna()
+            if len(non_null) > 0 and non_null.astype(str).str.match(r"^\d{4}-\d{2}-\d{2}").mean() > 0.8:
+                return "VARCHAR -- ngày ISO 'YYYY-MM-DD[ HH:MM:SS]', lọc bằng CAST(... AS DATE)"
             if len(non_null) > 0 and series.dtype == object:
                 uniq = non_null.unique().tolist()
-                if 1 < len(uniq) <= 4 and all(len(str(u)) <= 15 for u in uniq):
-                    return f"VARCHAR {uniq}"
+                # Cột phân loại ít giá trị (trạng thái, kênh, nhóm, hình thức TT): liệt kê đủ giá trị thật để lọc đúng chính tả
+                if 1 < len(uniq) <= 8 and all(len(str(u)) <= 30 for u in uniq):
+                    return f"VARCHAR -- giá trị: {uniq}"
             return "VARCHAR"
 
-        # Nhóm các bảng có cùng cấu trúc cột để tránh lặp lại hàng chục lần (như các bảng tháng của dev_005, dev_014)
+        # Nhóm các bảng có cùng cấu trúc cột để tránh lặp lại hàng chục lần (như các bảng chia theo tháng)
         by_cols: Dict[Tuple[str, ...], List[Tuple[str, pd.DataFrame]]] = {}
         for tbl_name, df in tables.items():
             if tbl_name in part_names_to_hide:
                 continue
+            ck = (business_id, tbl_name)
+            if ck in self._schema_cols_cache:
+                by_cols.setdefault(self._schema_cols_cache[ck], []).append((tbl_name, df))
+                continue
             synthetic = df.attrs.get("synthetic_aliases", set())
-            # Giữ lại các cột thực tế và cột chuẩn hóa cốt lõi (status_norm, qty_base)
+            # Giữ lại các cột thực tế và cột chuẩn hóa cốt lõi (status_norm, qty_base, revenue_norm)
             # Ẩn bớt các alias tổng hợp nhân bản trong Schema Prompt để tránh vượt ngưỡng 8192 token gây lỗi 400 Bad Request
-            cols_key = tuple(
-                c for c in df.columns
-                if c != "_sheet_name" and (c not in synthetic or c in {"status_norm", "qty_base"})
-            )
+            core_norm = {"status_norm", "qty_base", "revenue_norm"}
+            visible: List[str] = []
+            probe = df.head(2000)
+            for c in df.columns:
+                if str(c).startswith("_") or (c in synthetic and c not in core_norm):
+                    continue
+                # Alias trùng y hệt một cột đã hiện (Ngày đặt hàng/Thời gian/date_iso... sao chép từ "Ngày") -> ẩn
+                if c not in core_norm and any(probe[c].equals(probe[v]) for v in visible):
+                    continue
+                visible.append(c)
+            cols_key = tuple(visible)
+            self._schema_cols_cache[ck] = cols_key  # tính một lần mỗi bảng (phép so cột tốn ~0.3s trên bảng lớn)
             by_cols.setdefault(cols_key, []).append((tbl_name, df))
 
         # Khử nhiễu: Khi shop có nhiều bảng (> 5 nhóm), chỉ hiển thị chi tiết các bảng liên quan tới câu hỏi
@@ -1796,7 +2258,7 @@ class BusinessDataStore:
                 cols_str = " ".join(c_key).lower()
                 sc = 0
                 # 1. Bán hàng & Doanh thu cốt lõi
-                if any(k in names_str for k in ["bán", "ban_hang", "hóa đơn", "hoa_don", "đơn hàng", "don_hang", "donhang", "so_chi_tiet", "sobanhang"]):
+                if any(k in names_str for k in ["bán", "ban_hang", "banhang", "hóa đơn", "hoa_don", "đơn hàng", "don_hang", "donhang"]):
                     sc += 30
                 elif any(k in cols_str for k in ["thành tiền", "thanh tien", "mã đơn", "ma don"]):
                     sc += 20
@@ -1837,6 +2299,11 @@ class BusinessDataStore:
         for cols_key, grp in items_to_render:
             tbl_names = [g[0] for g in grp]
             rep_df = grp[0][1]
+            render_key = (business_id, tuple(tbl_names), cols_key, max_sample_rows)
+            if render_key in self._schema_render_cache:
+                lines.extend(self._schema_render_cache[render_key])
+                continue
+            block_start = len(lines)
 
             col_defs = []
             for col in cols_key:
@@ -1853,12 +2320,13 @@ class BusinessDataStore:
             lines.append(f'CREATE TABLE "{tbl_names[0]}" (\n' + ",\n".join(col_defs) + "\n);")
 
             if not rep_df.empty and max_sample_rows > 0:
-                sample_records = rep_df.head(max_sample_rows).to_dict(orient="records")
+                sample_records = rep_df[list(cols_key)].head(max_sample_rows).to_dict(orient="records")
                 for r in sample_records:
                     row_json = json.dumps(r, ensure_ascii=False, default=str)
                     if len(row_json) > 350:
                         row_json = row_json[:347] + "..."
                     lines.append(f"  -- Mẫu: {row_json}")
+            self._schema_render_cache[render_key] = lines[block_start:]
 
         if omitted_table_names:
             omitted_desc = ", ".join(f'"{t}"' for t in omitted_table_names)

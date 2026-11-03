@@ -133,7 +133,10 @@ def test_are_strings_in_consensus_variations():
     # Kiểm tra đồng thuận giữa các chuỗi có sự khác biệt nhỏ về dấu, khoảng trắng, ngoặc kép
     assert are_strings_in_consensus('"Trà sữa"', 'Trà sữa')
     assert are_strings_in_consensus('Cà phê sữa đá  ', '  cà phê sữa đá')
-    assert are_strings_in_consensus('Đoàn Chuẩn', 'Doan Chuan')
+    # Khác dấu là khác tên (luật chấm giữ dấu): không đồng thuận
+    assert not are_strings_in_consensus('Đoàn Chuẩn', 'Doan Chuan')
+    assert not are_strings_in_consensus('Bánh mì bơ', 'Bánh mì bò')
+    assert are_strings_in_consensus('Cà phê-sữa', 'cà phê sữa')
     assert not are_strings_in_consensus('Trà đào', 'Trà vải')
 
 
@@ -184,13 +187,37 @@ def test_postprocess_string_currency_cleaning():
 
 
 def test_check_consensus_post_rounding():
-    # 2 kết quả lệch số thập phân nhưng sau khi làm tròn về đồng (Mục 9 Rulebook) thì giống nhau
-    p1 = {"type": "number", "answer": 5000000.4}
-    p2 = {"type": "number", "answer": 5000000.1}
+    # Tiền lệch phần lẻ: sau postprocess (làm tròn về đồng, Mục 9) thì giống nhau
+    q = "Doanh thu bao nhiêu tiền?"
+    p1 = postprocess_and_guard("q", q, 5000000.4, "number")
+    p2 = postprocess_and_guard("q", q, 5000000.1, "number")
     assert check_consensus(p1, p2)
 
     # 2 kết quả phần trăm làm tròn 2 chữ số thập phân giống nhau
     p3 = {"type": "percent", "answer": 12.341}
     p4 = {"type": "percent", "answer": 12.344}
     assert check_consensus(p3, p4)
+
+
+def test_check_consensus_rejects_integer_rounding_for_percent_and_averages():
+    # 12.4% và 12.0% chấm điểm khác nhau -> không được coi là đồng thuận
+    assert not check_consensus({"type": "percent", "answer": 12.4}, {"type": "percent", "answer": 12.0})
+    assert not check_consensus({"type": "number", "answer": 2.45}, {"type": "number", "answer": 2.1})
+
+
+def test_numeric_list_keeps_duplicates():
+    p = postprocess_and_guard("q", "Còn mấy thùng mấy chai?", {"type": "list", "answer": [3, 3]}, "list")
+    assert p["answer"] == [3, 3]
+
+
+def test_small_percent_not_rescaled_when_code_multiplies_by_100():
+    raw = {"type": "percent", "answer": 0.45}
+    code = "val = (a - b) * 100.0 / b"
+    assert postprocess_and_guard("q", "Tăng bao nhiêu %?", raw, "percent", code=code)["answer"] == 0.45
+    assert postprocess_and_guard("q", "Tăng bao nhiêu %?", raw, "percent", code="val = (a - b) / b")["answer"] == 45
+
+
+def test_size_suffix_is_not_consensus():
+    assert not are_strings_in_consensus("Trà sữa (M)", "Trà sữa (L)")
+    assert are_strings_in_consensus("Trà sữa (M)", "trà sữa (m)")
 

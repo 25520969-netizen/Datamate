@@ -116,6 +116,9 @@ def _serialize_default(obj: Any) -> Any:
         return obj.isoformat()[:10]
     if isinstance(obj, np.ndarray):
         return obj.tolist()
+    if type(obj).__name__ == "Decimal":
+        # DuckDB trả DECIMAL (vd `100.0 * x`, cột DECIMAL) -> phải là số JSON, không phải chuỗi "3.75"
+        return int(obj) if obj == obj.to_integral_value() else float(obj)
     if pd.isna(obj):
         return None
     return str(obj)
@@ -152,6 +155,28 @@ def _build_col_fuzzy_rules(tables: Dict[str, pd.DataFrame]) -> List[Tuple[Any, s
     return col_fuzzy_rules
 
 
+class _CopyOnAccessTables(dict):
+    """dict bảng trả về bản sao sâu của DataFrame ở lần truy cập đầu (lazy) để code sinh ra không làm hỏng cache."""
+
+    def __init__(self, shared: Dict[str, pd.DataFrame]) -> None:
+        super().__init__(shared)
+        self._copies: Dict[str, pd.DataFrame] = {}
+
+    def __getitem__(self, key: str) -> pd.DataFrame:
+        if key not in self._copies:
+            self._copies[key] = super().__getitem__(key).copy(deep=True)
+        return self._copies[key]
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self[key] if key in self else default
+
+    def values(self):  # type: ignore[override]
+        return [self[k] for k in self.keys()]
+
+    def items(self):  # type: ignore[override]
+        return [(k, self[k]) for k in self.keys()]
+
+
 class SafeDuckDBWrapper:
     """Bọc kết nối DuckDB để tự động chuyển MySQL backticks thành double-quotes, so khớp mờ tên cột và phòng thủ cột giả định."""
 
@@ -182,6 +207,7 @@ class SafeDuckDBWrapper:
             # 1. status_norm
             if "status_norm" not in all_cols:
                 fixed = re.sub(r'CASE\s+WHEN\s+("status_norm"|\bstatus_norm\b)\s*=\s*[\'"][^\'"]*[\'"]\s+THEN\s+([^E]+?)\s+END', r'NULL', fixed, flags=re.I)
+                fixed = re.sub(r'COALESCE\s*\(\s*(?:\w+\.)?("status_norm"|\bstatus_norm\b)\s*,\s*\'[^\']*\'\s*\)\s*(?:NOT\s+IN\s*\([^)]*\)|IN\s*\([^)]*\)|<>\s*\'[^\']*\'|!=\s*\'[^\']*\'|=\s*\'[^\']*\')', '1=1', fixed, flags=re.I)
                 fixed = re.sub(r'("status_norm"|\bstatus_norm\b)\s*=\s*[\'"][^\'"]*[\'"]', '1=1', fixed, flags=re.I)
                 fixed = re.sub(r'("status_norm"|\bstatus_norm\b)\s*!=\s*[\'"][^\'"]*[\'"]', '1=1', fixed, flags=re.I)
                 fixed = re.sub(r'("status_norm"|\bstatus_norm\b)\s+NOT\s+IN\s*\([^)]*\)', '1=1', fixed, flags=re.I)
@@ -220,20 +246,31 @@ class SafeDuckDBWrapper:
 
 
 class _FuzzyDateContext(dict):
+    """Tra khoá mờ trong date_context. Khoá không xác định được -> KeyError (để vòng tự sửa lỗi kích hoạt),
+    KHÔNG âm thầm trả về một kỳ khác (vd 'last_month' từng bị trả thành tháng này)."""
+
     def __getitem__(self, key):
         if key in self:
             return super().__getitem__(key)
-        k_low = str(key).lower().replace(" ", "_")
+        k_low = str(key).lower().replace(" ", "_").replace("-", "_")
         for orig_k in self:
             if orig_k.lower().replace(" ", "_") == k_low:
                 return super().__getitem__(orig_k)
+        is_prev = any(t in k_low for t in ("last", "prev", "previous", "truoc", "trước", "ago", "rồi", "roi"))
         if "two_week" in k_low or "2_week" in k_low or "hai_tuan" in k_low or "2_tuan" in k_low:
-            return self.get("two_weeks_ago", self.get("two_weeks_before", self.get("hai tuần trước", (self.get("as_of_date"), self.get("as_of_date")))))
-        if "week" in k_low or "tuan" in k_low:
-            return self.get("this_week", (self.get("as_of_date"), self.get("as_of_date")))
-        if "month" in k_low or "thang" in k_low:
-            return self.get("this_month", (self.get("as_of_date"), self.get("as_of_date")))
-        return (self.get("as_of_date"), self.get("as_of_date"))
+            if "two_weeks_ago" in self:
+                return super().__getitem__("two_weeks_ago")
+        elif "week" in k_low or "tuan" in k_low or "tuần" in k_low:
+            target = "last_week" if is_prev else "this_week"
+            if target in self:
+                return super().__getitem__(target)
+        elif "month" in k_low or "thang" in k_low or "tháng" in k_low:
+            target = ("prev_month_same_days" if "same" in k_low else "prev_month_full") if is_prev else "this_month"
+            if target in self:
+                return super().__getitem__(target)
+        elif k_low in ("today", "now", "hom_nay"):
+            return super().__getitem__("today")
+        raise KeyError(f"date_context không có khoá {key!r}. Các khoá hợp lệ: {sorted(k for k in self.keys() if k.isascii())}")
 
 
 SANDBOX_RUNNER_TEMPLATE = r'''# -*- coding: utf-8 -*-
@@ -274,25 +311,39 @@ def _serialize_default(obj):
         return obj.isoformat()[:10]
     if isinstance(obj, np.ndarray):
         return obj.tolist()
+    if type(obj).__name__ == "Decimal":
+        # DuckDB trả DECIMAL (vd `100.0 * x`, cột DECIMAL) -> phải là số JSON, không phải chuỗi "3.75"
+        return int(obj) if obj == obj.to_integral_value() else float(obj)
     if pd.isna(obj):
         return None
     return str(obj)
 
 class _FuzzyDateContext(dict):
+    """Tra khoá mờ trong date_context. Khoá không xác định được -> KeyError (để vòng tự sửa lỗi kích hoạt),
+    KHÔNG âm thầm trả về một kỳ khác (vd 'last_month' từng bị trả thành tháng này)."""
+
     def __getitem__(self, key):
         if key in self:
             return super().__getitem__(key)
-        k_low = str(key).lower().replace(" ", "_")
+        k_low = str(key).lower().replace(" ", "_").replace("-", "_")
         for orig_k in self:
             if orig_k.lower().replace(" ", "_") == k_low:
                 return super().__getitem__(orig_k)
+        is_prev = any(t in k_low for t in ("last", "prev", "previous", "truoc", "trước", "ago", "rồi", "roi"))
         if "two_week" in k_low or "2_week" in k_low or "hai_tuan" in k_low or "2_tuan" in k_low:
-            return self.get("two_weeks_ago", self.get("two_weeks_before", self.get("hai tuần trước", (self.get("as_of_date"), self.get("as_of_date")))))
-        if "week" in k_low or "tuan" in k_low:
-            return self.get("this_week", (self.get("as_of_date"), self.get("as_of_date")))
-        if "month" in k_low or "thang" in k_low:
-            return self.get("this_month", (self.get("as_of_date"), self.get("as_of_date")))
-        return (self.get("as_of_date"), self.get("as_of_date"))
+            if "two_weeks_ago" in self:
+                return super().__getitem__("two_weeks_ago")
+        elif "week" in k_low or "tuan" in k_low or "tuần" in k_low:
+            target = "last_week" if is_prev else "this_week"
+            if target in self:
+                return super().__getitem__(target)
+        elif "month" in k_low or "thang" in k_low or "tháng" in k_low:
+            target = ("prev_month_same_days" if "same" in k_low else "prev_month_full") if is_prev else "this_month"
+            if target in self:
+                return super().__getitem__(target)
+        elif k_low in ("today", "now", "hom_nay"):
+            return super().__getitem__("today")
+        raise KeyError(f"date_context không có khoá {key!r}. Các khoá hợp lệ: {sorted(k for k in self.keys() if k.isascii())}")
 
 def main():
     payload_path = Path(sys.argv[1])
@@ -359,6 +410,7 @@ def main():
                 all_cols = {str(c).lower() for df in self._tables.values() if hasattr(df, "columns") for c in df.columns}
                 if "status_norm" not in all_cols:
                     fixed = re.sub(r'CASE\s+WHEN\s+("status_norm"|\bstatus_norm\b)\s*=\s*[\'"][^\'"]*[\'"]\s+THEN\s+([^E]+?)\s+END', r'NULL', fixed, flags=re.I)
+                    fixed = re.sub(r'COALESCE\s*\(\s*(?:\w+\.)?("status_norm"|\bstatus_norm\b)\s*,\s*\'[^\']*\'\s*\)\s*(?:NOT\s+IN\s*\([^)]*\)|IN\s*\([^)]*\)|<>\s*\'[^\']*\'|!=\s*\'[^\']*\'|=\s*\'[^\']*\')', '1=1', fixed, flags=re.I)
                     fixed = re.sub(r'("status_norm"|\bstatus_norm\b)\s*=\s*[\'"][^\'"]*[\'"]', '1=1', fixed, flags=re.I)
                     fixed = re.sub(r'("status_norm"|\bstatus_norm\b)\s*!=\s*[\'"][^\'"]*[\'"]', '1=1', fixed, flags=re.I)
                     fixed = re.sub(r'("status_norm"|\bstatus_norm\b)\s+NOT\s+IN\s*\([^)]*\)', '1=1', fixed, flags=re.I)
@@ -607,9 +659,11 @@ class PythonSandbox:
         as_of_date: str,
         date_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        raw_con, tables = self._warm_store.create_duckdb_connection(business_id)
-        rules = _build_col_fuzzy_rules(tables)
-        safe_con = SafeDuckDBWrapper(raw_con, rules, tables=tables)
+        raw_con, shared_tables = self._warm_store.create_duckdb_connection(business_id)
+        # Code LLM chỉ thấy bản sao: DataFrame cache dùng chung cho mọi câu hỏi/luồng không được bị sửa tại chỗ
+        tables = _CopyOnAccessTables(shared_tables)
+        rules = _build_col_fuzzy_rules(shared_tables)
+        safe_con = SafeDuckDBWrapper(raw_con, rules, tables=shared_tables)
         duckdb_proxy = _DuckDBModuleProxy(safe_con)
 
         fuzzy_ctx = _FuzzyDateContext(date_context or {})
@@ -706,7 +760,7 @@ class PythonSandbox:
                 if 1 <= ln_no <= len(code_lines):
                     offending_info = f"\nDòng gây lỗi (line {ln_no}): {code_lines[ln_no - 1].strip()}"
             ordered_tbls = sorted(
-                [(t, d) for t, d in tables.items() if not re.match(r"^.+?_(\d+|202[4-9])$", t)],
+                [(t, d) for t, d in shared_tables.items() if not re.match(r"^.+?_(\d+|202[4-9])$", t)],
                 key=lambda item: (0 if item[0] in cleaned_code else 1, item[0]),
             )
             schema_hint = "; ".join(

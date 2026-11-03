@@ -8,23 +8,50 @@ Module 2B: Query Analyzer & Rule Knowledge Injector.
 
 import re
 import unicodedata
+from functools import lru_cache
 from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from src.lexicon import load_lexicon
 from src.vietnamese_normalizer import VietnameseNormalizer
 
 
-def strip_accents(text: str) -> str:
-    """Loại bỏ dấu tiếng Việt và đưa về chữ thường để so khớp thực thể mềm."""
-    if not isinstance(text, str):
-        text = str(text)
+@lru_cache(maxsize=65536)
+def _strip_accents_str(text: str) -> str:
     text = text.replace("đ", "d").replace("Đ", "d")
     text = unicodedata.normalize("NFD", text)
     text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
     return unicodedata.normalize("NFC", text).lower().strip()
+
+
+def strip_accents(text: str) -> str:
+    """Loại bỏ dấu tiếng Việt và đưa về chữ thường để so khớp thực thể mềm (có cache: hàm thuần, gọi lặp rất nhiều)."""
+    if not isinstance(text, str):
+        text = str(text)
+    return _strip_accents_str(text)
+
+
+@lru_cache(maxsize=None)
+def _keyword_patterns(keyword: str):
+    """Biên dịch một lần mỗi từ khoá (trước đây biên dịch lại mỗi câu hỏi, làm tràn cache regex của Python)."""
+    k = keyword.strip()
+    exact = re.compile(r"(?<!\w)" + re.escape(k) + r"(?!\w)")
+    na = re.compile(r"(?<!\w)" + re.escape(strip_accents(k)) + r"(?!\w)") if len(k.split()) >= 2 else None
+    return exact, na
+
+
+def keyword_in_question(keyword: str, q: str, q_na: str) -> bool:
+    """
+    Từ khoá có trong câu hỏi, theo ranh giới từ. Cụm >= 2 từ so cả dạng không dấu (câu hỏi gõ không dấu);
+    từ đơn chỉ so có dấu vì bỏ dấu làm trùng từ khác ("bão" ~ "bao", "tâm" ~ "tam").
+    """
+    exact, na = _keyword_patterns(keyword)
+    if exact.search(q):
+        return True
+    return na is not None and na.search(q_na) is not None
 
 
 class DynamicEntityGrounder:
@@ -39,6 +66,7 @@ class DynamicEntityGrounder:
 
     def __init__(self) -> None:
         self._cache: Dict[str, Dict[str, List[Tuple[str, str, str]]]] = {}
+        self._prepared: Dict[str, Any] = {}
 
     def _build_index_for_business(self, business_id: str, tables: Dict[str, Any]) -> Dict[str, List[Tuple[str, str, str]]]:
         if business_id in self._cache:
@@ -64,15 +92,19 @@ class DynamicEntityGrounder:
                 c for c in df.columns
                 if any(k in c.lower() for k in ["đvt", "dvt", "đơn vị", "don_vi", "quy cách", "unit"])
             ]
-            dvt_col = dvt_cols[0] if dvt_cols else None
-
             for nc in name_cols:
+                # Cột tên có thể đồng thời trùng từ khoá đơn vị (vd "Hàng - Unit"): không dùng chính nó làm cột ĐVT
+                # (trước đây tạo DataFrame trùng cột và làm lỗi mọi câu hỏi của shop đó)
+                dvt_col = next((c for c in dvt_cols if c != nc), None)
                 subset_cols = [nc] + ([dvt_col] if dvt_col else [])
-                for _, row in df[subset_cols].drop_duplicates().iterrows():
-                    orig = str(row[nc]).strip()
+                sub = df[subset_cols].drop_duplicates()
+                names = sub[nc].tolist()
+                dvts = sub[dvt_col].tolist() if dvt_col else [None] * len(names)
+                for name_val, dvt_val in zip(names, dvts):
+                    orig = str(name_val).strip()
                     if not orig or orig.lower() in ["none", "nan", "", "<na>", "null"]:
                         continue
-                    dvt = str(row[dvt_col]).strip() if dvt_col and pd.notna(row[dvt_col]) else ""
+                    dvt = str(dvt_val).strip() if dvt_col and pd.notna(dvt_val) else ""
                     key = strip_accents(orig)
                     # Chỉ lập chỉ mục các chuỗi từ 3 ký tự trở lên để tránh nhiễu
                     if len(key) >= 3:
@@ -101,10 +133,22 @@ class DynamicEntityGrounder:
         matched_hints: List[str] = []
         matched_keys: set = set()
 
-        sorted_keys = sorted(entity_map.keys(), key=len, reverse=True)
+        # Danh sách khoá đã sắp xếp và các từ của khoá được tính MỘT lần mỗi shop (trước đây mỗi câu hỏi sắp xếp lại
+        # hàng nghìn khoá và biên dịch lại regex cho từng khoá)
+        prepared = self._prepared.get(business_id)
+        if prepared is None:
+            keys_sorted = sorted(entity_map.keys(), key=len, reverse=True)
+            key_tokens = {}
+            for k in keys_sorted:
+                ck = re.sub(r"\(.*?\)", "", k).strip()
+                key_tokens[k] = [t for t in re.split(r"[\s_]+", ck) if t]
+            prepared = (keys_sorted, key_tokens)
+            self._prepared[business_id] = prepared
+        sorted_keys, key_tokens = prepared
 
         for key in sorted_keys:
-            if re.search(r"(?:^|[^\w])" + re.escape(key) + r"(?:[^\w]|$)", q_clean):
+            # Tiền kiểm tra chuỗi con: regex bên dưới chỉ có thể khớp khi khoá xuất hiện nguyên văn trong câu hỏi
+            if key in q_clean and re.search(r"(?:^|[^\w])" + re.escape(key) + r"(?:[^\w]|$)", q_clean):
                 if any(key in mk for mk in matched_keys):
                     continue
                 matched_keys.add(key)
@@ -132,8 +176,7 @@ class DynamicEntityGrounder:
                     break
                 if any(key in mk for mk in matched_keys):
                     continue
-                clean_key = re.sub(r"\(.*?\)", "", key).strip()
-                toks = [t for t in re.split(r"[\s_]+", clean_key) if t]
+                toks = key_tokens[key]
                 if len(toks) < 2:
                     continue
                 # Tối ưu: Nếu không có từ nào của key xuất hiện trong câu hỏi thì bỏ qua ngay lập tức
@@ -162,7 +205,7 @@ class DynamicEntityGrounder:
         return "=== GỢI Ý THỰC THỂ KHỚP TRONG CƠ SỞ DỮ LIỆU ===\n" + "\n".join(matched_hints)
 
 
-DEFAULT_RULEBOOK_PATH = Path(__file__).resolve().parent.parent / "train" / "rulebook.md"
+DEFAULT_RULEBOOK_PATH = Path(__file__).resolve().parent.parent / "assets" / "rulebook.md"
 
 
 class RulebookKnobs:
@@ -254,25 +297,42 @@ class RuleEngine:
         self.full_rulebook = self.rulebook_path.read_text(encoding="utf-8")
         self.knobs = RulebookKnobReader.parse_knobs(self.full_rulebook)
 
+        # Tách mục theo tiêu đề "## ..."; mục con "### ..." của một mục "theo ngành" (bất kể số thứ tự) tách riêng
         current_header = "intro"
+        parent_h2 = ""
         buf: List[str] = []
         for line in self.full_rulebook.splitlines():
             if line.startswith("## "):
                 self.sections[current_header] = "\n".join(buf).strip()
-                current_header = line.lstrip("#").strip()
+                current_header = parent_h2 = line.lstrip("#").strip()
                 buf = [line]
-            elif line.startswith("### ") and current_header.startswith("6. Theo ngành"):
+            elif line.startswith("### ") and "ngành" in parent_h2.lower():
                 self.sections[current_header] = "\n".join(buf).strip()
-                sub_title = line.lstrip("#").strip()
-                current_header = f"6. Theo ngành - {sub_title}"
+                current_header = f"{parent_h2} - {line.lstrip('#').strip()}"
                 buf = [line]
             else:
                 buf.append(line)
         self.sections[current_header] = "\n".join(buf).strip()
 
+    @property
+    def walk_in_not_customer(self) -> bool:
+        """Rulebook đang dùng có ghi khách lẻ / khách vãng lai không phải khách (không đếm, không xếp hạng) hay không."""
+        if not self.full_rulebook:
+            return True
+        text = unicodedata.normalize("NFC", self.full_rulebook).lower()
+        return bool(re.search(r"khách lẻ[^\n|]{0,40}(?:không phải khách|không đếm|không xếp hạng|không tính)", text))
+
+    def _section_title(self, *keywords: str) -> Optional[str]:
+        """Tìm mục rulebook theo từ khoá trong tiêu đề (không phụ thuộc số thứ tự mục)."""
+        for title in self.sections:
+            t = title.lower()
+            if any(k in t for k in keywords):
+                return title
+        return None
+
     @staticmethod
     def normalize_telex_typos(s: str) -> str:
-        """Chuẩn hóa lỗi gõ Telex và Unicode NFC bằng VietnameseNormalizer theo chuẩn ViLexNorm."""
+        """Chuẩn hóa Unicode NFC và viết tắt nghiệp vụ bằng VietnameseNormalizer (luật viết tay, không dùng ViLexNorm)."""
         return VietnameseNormalizer.clean_deterministic(s)
 
     @staticmethod
@@ -289,7 +349,7 @@ class RuleEngine:
             re.search(
                 r"\b(mỗi người còn nợ bao nhiêu|mỗi người nợ bao nhiêu|mỗi người nợ bn|mỗi khách nợ bao nhiêu|"
                 r"mỗi người bao nhiêu tiền nợ|số nợ của từng người|mỗi người đang nợ bao nhiêu|"
-                r"moi nguoi con no|moi nguoi no|tung nguoi con no|moi nguoi bnhiu|"
+                r"moi nguoi con no|moi nguoi no|tung nguoi con no|"
                 r"kèm\s*(?:theo\s*)?(?:số\s*tiền\s*)?(?:còn\s*)?nợ|kèm\s*dư\s*nợ|"
                 r"kem\s*(?:theo\s*)?(?:so\s*tien\s*)?(?:con\s*)?no|kem\s*du\s*no|"
                 r"và\s*(?:số\s*tiền\s*)?(?:còn\s*)?nợ|va\s*(?:so\s*tien\s*)?(?:con\s*)?no)\b",
@@ -314,7 +374,6 @@ class RuleEngine:
                     "mỗi khách còn nợ bao nhiêu",
                     "từng khách còn nợ bao nhiêu",
                     "từng người còn nợ",
-                    "từng người nha",
                     "mỗi người còn nợ",
                     "số nợ của từng",
                     "nợ của từng người",
@@ -385,13 +444,13 @@ class RuleEngine:
         if re.search(
             r"\b(ngày nào|ngay nao|ngày mấy|ngay may|hôm nào|hom nao|khi nào|khi nao|bao giờ|bao gio|"
             r"hạn dùng ngày nào|han dung ngay nao|hạn sử dụng là ngày|ngày bao nhiêu|ngay bao nhieu|"
-            r"tháng nào|thang nao|vào tháng nào|vao thang nao|thang naof)\b",
+            r"tháng nào|thang nao|vào tháng nào|vao thang nao)\b",
             q,
         ):
             return "date"
 
         # 5. List:
-        # a. Hỏi 2 hoặc nhiều giá trị: "mỗi loại bao nhiêu", "lần lượt là bao nhiêu", "theo thứ tự đó", "mấy ... chẵn ... lẻ", "tuổi nợ"
+        # a. Hỏi 2 hoặc nhiều giá trị: "mỗi loại bao nhiêu", "lần lượt là bao nhiêu", "theo thứ tự đó", "mấy ... chẵn ... lẻ"
         # hoặc nhiều vế câu hỏi bao nhiêu, hoặc 2 doanh thu nối bằng "và" / "va"
         list_kw_regex = (
             r"\b(mỗi loại bao nhiêu|mỗi loại bn|mỗi bên bao nhiêu|mỗi bên bn|mỗi thứ bao nhiêu|mỗi thứ bn|"
@@ -401,7 +460,6 @@ class RuleEngine:
             r"ghi (?:hai|ba|[2-9]) số|ghi (?:hai|ba|[2-9]) so|hai số|2 số|ba số|3 số|trả lời hai số|tra loi hai so|trả lời 2 số|tra loi 2 so|"
             r"ghi lần lượt|ghi lan luot|"
             r"chẵn.*lẻ|chan.*le|hộp chẵn|vỉ chẵn|thùng chẵn|"
-            r"tuổi nợ|tuoi no|"
             r"từ tháng cũ đến tháng mới|tu thang cu den thang moi)\b"
         )
         if (
@@ -416,22 +474,24 @@ class RuleEngine:
             return "list"
 
         # b. Hỏi danh sách đối tượng: những ai, top N, các mặt hàng nào, liệt kê, N khách mua nhiều nhất, cho tôi N ...
+        # Mệnh đề phạm vi "Trong các món, món nào ... nhất" hỏi MỘT đối tượng -> bỏ trước khi dò dấu hiệu danh sách
+        q_scope = re.sub(r"\b(?:trong|trong số|giữa)\s+(?:các|những|số)\b[^,?]*,", "", q)
         if (
             re.search(
                 r"\b(những .* nào|nhung .* nao|các .* nào|cac .* nao|liệt kê|liet ke|top\s*\d+|"
                 r"(?:cho\s*(?:tôi|toi|mình|minh|em|xin)\s+)?(?<!\d)(?:[2-9]|10)\s+(?:mặt hàng|mat hang|khách hàng|khach hang|khách|khach|món|mon|sản phẩm|san pham|thợ|tho|nhân viên|nhan vien|thuốc|thuoc)\b|"
                 r"bao nhiêu mỗi tháng|mỗi tháng là bao nhiêu|mấy thùng mấy|bao nhiêu thùng bao nhiêu|"
                 r"(?:hàng|thuốc|mặt hàng|sản phẩm)\s+nào\s+hết\s+hạn)\b",
-                q,
+                q_scope,
             )
-            or bool(re.search(r"\b(?<!\d)(?:[2-9]|10)\s+(?:khách|khach|mặt hàng|mat hang|món|mon|sản phẩm|san pham|thợ|tho|nhân viên|nhan vien|thuốc|thuoc)\b", q))
+            or bool(re.search(r"\b(?<!\d)(?:[2-9]|10)\s+(?:khách|khach|mặt hàng|mat hang|món|mon|sản phẩm|san pham|thợ|tho|nhân viên|nhan vien|thuốc|thuoc)\b", q_scope))
         ):
             # Lưu ý: nếu hỏi số lượng mặt hàng ế ("mấy mặt hàng ế") thì là NUMBER
-            if not re.search(r"\b(?:mấy|bao nhiêu)\s+(?:mặt hàng|sản phẩm|món|loại)\s+(?:ế|ees|bán chậm|không ai mua)\b", q):
+            if not re.search(r"\b(?:mấy|bao nhiêu)\s+(?:mặt hàng|sản phẩm|món|loại)\s+(?:ế|bán chậm|không ai mua)\b", q):
                 return "list"
 
         # Đếm số lượng mặt hàng ế / thuốc / khách ("mấy mặt hàng ế", "có bao nhiêu mặt hàng không bán được") -> Luôn là NUMBER
-        if re.search(r"\b(?:mấy|bao nhiêu)\s+(?:mặt hàng|sản phẩm|món|loại)\s+(?:ế|ees|bán chậm|không ai mua)\b", q):
+        if re.search(r"\b(?:mấy|bao nhiêu)\s+(?:mặt hàng|sản phẩm|món|loại)\s+(?:ế|bán chậm|không ai mua)\b", q):
             return "number"
 
         # 6. String: hỏi đích danh 1 đối tượng duy nhất (ai, hàng nào, sản phẩm nào, món nào, khách nào, ncc nào, là gì, là chi)
@@ -449,11 +509,19 @@ class RuleEngine:
 
         return "number"
 
+    # Chủ đề "dữ liệu không có thông tin này" nằm trong assets/lexicon.json (unanswerable_topics): mỗi chủ đề gồm
+    # keywords (câu hỏi hỏi về thông tin này), data_keys (tên cột/bảng cho thấy shop CÓ ghi thông tin đó), reason.
+    # Từ khoá mà rulebook đang dùng có định nghĩa bị loại tự động tại chỗ dùng.
+    @classmethod
+    def unanswerable_topics(cls) -> List[Dict[str, Any]]:
+        return load_lexicon().unanswerable_topics
+
     @staticmethod
     def detect_unanswerable_deterministic(
         question_obj: Dict[str, Any],
         store: Any,
         date_resolver: Any,
+        rulebook_text: str = "",
     ) -> Tuple[bool, str]:
         """
         Kiểm tra tiền định theo Mục 7 Rulebook:
@@ -467,7 +535,8 @@ class RuleEngine:
         as_of = question_obj.get("as_of_date", "")
 
         # 1. Kiểm tra ngày ngoài khoảng dữ liệu của shop (chỉ áp dụng cho kỳ bán hàng, không áp dụng cho hạn dùng trong tương lai)
-        is_expiry_q = any(k in q for k in ["hạn dùng", "han dung", "hạn sử dụng", "han su dung", "hsd", "hết hạn trong", "het han trong", "hết hạn vào", "het han vao"])
+        q_na = strip_accents(q)
+        is_expiry_q = any(k in q_na for k in ["han dung", "han su dung", "hsd", "het han", "can date", "het date", "qua han"])
         if not is_expiry_q:
             if hasattr(store, "get_shop_date_range"):
                 s_min, s_max = store.get_shop_date_range(bid)
@@ -480,6 +549,11 @@ class RuleEngine:
                 return True, "Shop không có dữ liệu bán hàng theo ngày."
 
             s_max_effective = max(s_max, as_of) if (as_of and s_max) else (s_max or as_of)
+            # README của shop ghi rõ khoảng dữ liệu phát hành -> dùng làm khoảng chuẩn (Mục 7)
+            readme_rng = RuleEngine.extract_readme_date_range(store.get_readme(bid)) if hasattr(store, "get_readme") else None
+            if readme_rng:
+                s_min = readme_rng[0] or s_min
+                s_max_effective = readme_rng[1] or s_max_effective
             d_ctx = date_resolver.resolve(question_obj.get("question", ""), as_of)
             for p in d_ctx.get("detected_periods", []):
                 st = p.get("start_date")
@@ -490,45 +564,77 @@ class RuleEngine:
                     if as_of and st > as_of and any(k in q for k in ["doanh thu", "bán được", "đơn hàng", "tiền hàng", "bán chạy", "khách mua"]):
                         return True, f"Kỳ hỏi ({st} đến {en}) nằm trong tương lai sau ngày hiện tại ({as_of}), chưa có dữ liệu giao dịch phát sinh."
 
+            # Câu so sánh với kỳ liền trước / cùng kỳ năm trước: kỳ so sánh cũng phải có dữ liệu (nếu nằm hoàn toàn ngoài
+            # khoảng ngày của shop thì không đủ dữ liệu để so, Mục 7)
+            explicit = [p for p in d_ctx.get("detected_periods", []) if p.get("year_month")]
+            if len(explicit) == 1 and s_min:
+                ym_y, ym_m = int(explicit[0]["year_month"][:4]), int(explicit[0]["year_month"][5:7])
+                base = None
+                if re.search(r"so voi thang (?:lien )?(?:truoc|trc)|thang lien (?:truoc|trc)|so thang (?:truoc|trc)", q_na):
+                    base = (ym_y - 1, 12) if ym_m == 1 else (ym_y, ym_m - 1)
+                elif re.search(r"cung ky (?:cua )?nam (?:ngoai|truoc|trc)", q_na):
+                    base = (ym_y - 1, ym_m)
+                if base is not None:
+                    import calendar as _cal
+                    b_end = f"{base[0]:04d}-{base[1]:02d}-{_cal.monthrange(base[0], base[1])[1]:02d}"
+                    if b_end < s_min:
+                        return True, f"Kỳ so sánh ({base[0]:04d}-{base[1]:02d}) nằm hoàn toàn trước khoảng ngày có dữ liệu của shop ({s_min})."
+
         tables = store.load_tables(bid) if hasattr(store, "load_tables") else {}
         all_cols = {c.lower() for df in tables.values() for c in getattr(df, "columns", [])}
         all_tbl_names = {t.lower() for t in tables.keys()}
 
         # 2. Câu hỏi cảm tính / thái độ / kỹ năng / chất lượng dịch vụ
-        if any(k in q for k in ["tận tâm", "nhiệt tình", "thái độ", "tốt bụng", "lễ phép", "chu đáo", "tay nghề", "mấy sao", "chất lượng dịch vụ", "đánh giá sao"]):
-            return True, "Dữ liệu shop không có cột đánh giá cảm tính, thái độ hoặc chất lượng dịch vụ."
+        def _has_col(keys: List[str]) -> bool:
+            return any(any(k in c for k in keys) for c in all_cols) or any(any(k in t for k in keys) for t in all_tbl_names)
 
-        # 3. Kiến thức y khoa / liều dùng / tác dụng phụ / chống chỉ định ngoài dữ liệu
-        if any(k in q for k in ["uống mỗi lần", "liều dùng", "cách dùng", "uống bao nhiêu viên", "uống mấy gói"]):
-            has_dosage_col = any(any(k in c for k in ["cách dùng", "cach_dung", "liều dùng", "lieu_dung", "hướng dẫn", "huong_dan"]) for c in all_cols)
-            if not has_dosage_col:
-                return True, "Liều dùng y tế là kiến thức bên ngoài, không ghi trong dữ liệu danh mục hàng."
-        if any(k in q for k in ["tác dụng phụ", "tac dung phu", "chống chỉ định", "chong chi dinh", "dị ứng", "di ung", "tương tác thuốc"]):
-            has_contra_col = any(any(k in c for k in ["tác dụng phụ", "chống chỉ định", "chong_chi_dinh", "tac_dung_phu"]) for c in all_cols)
-            if not has_contra_col:
-                return True, "Tác dụng phụ và chống chỉ định y tế là kiến thức dược lý bên ngoài, không có trong dữ liệu bán hàng."
+        def _kw(keys: List[str]) -> bool:
+            """Từ khoá có trong câu hỏi (theo ranh giới từ; cụm nhiều từ so cả dạng không dấu)."""
+            return any(keyword_in_question(k, q, q_na) for k in keys)
 
-        # 4. Lý do hủy đơn hàng
-        if any(k in q for k in ["vì giao trễ", "vi giao tre", "lý do hủy", "lý do huỷ", "lí do hủy", "lí do huỷ", "ly do huy", "li do"]):
-            if not any(any(k in c for k in ["lý do", "lí do", "nguyên nhân", "ly_do", "reason"]) for c in all_cols):
-                return True, "Shop không có cột ghi nhận lý do hủy/trả đơn hàng."
+        cat_values = store.get_category_values(bid) if hasattr(store, "get_category_values") else set()
+
+        def _is_data_value(keys: List[str]) -> bool:
+            """Từ khoá thực ra là TÊN nhóm/giá trị trong dữ liệu của shop (vd nhóm hàng "Dị ứng") -> không phải câu hỏi y khoa."""
+            hit = [k for k in keys if keyword_in_question(k, q, q_na)]
+            return bool(hit) and all(any(strip_accents(k) in v for v in cat_values) for k in hit)
+
+
+        # Ngân hàng chủ đề "dữ liệu không có thông tin này": mỗi chủ đề = (từ khoá trong câu hỏi) VÀ (shop không có cột/bảng
+        # tương ứng) VÀ (từ khoá không phải giá trị trong dữ liệu) VÀ (từ khoá không phải thuật ngữ được rulebook định nghĩa).
+        rb_low = unicodedata.normalize("NFC", rulebook_text).lower() if rulebook_text else ""
+        rb_na = strip_accents(rb_low)
+        for topic in RuleEngine.unanswerable_topics():
+            hits = [k for k in topic["keywords"] if keyword_in_question(k, q, q_na)]
+            hits = [k for k in hits if not (rb_low and (k in rb_low or strip_accents(k) in rb_na))]
+            if not hits or _has_col(topic["data_keys"]) or _is_data_value(hits):
+                continue
+            return True, topic["reason"]
 
         # 5. Địa chỉ / đường phố của khách hàng (nhận diện theo cấu trúc ngữ cảnh địa chỉ, không hardcode từ điển)
         is_street_address_query = bool(re.search(
-            r"\b(?:khách\s+(?:hàng\s+)?(?:ở|tại)\s+đường|tại\s+đường\s+[a-zà-ỹ0-9]|ở\s+đường\s+[a-zà-ỹ0-9]|địa\s+chỉ\s+(?:nhà|của\s+khách|giao)|tên\s+đường\s+của\s+khách)\b",
-            q
+            r"\b(?:khach\s+(?:hang\s+)?(?:nha\s+)?(?:o|tai|song)\s+(?:duong|quan|phuong|huyen|tinh|thanh pho|tp)|khach\s+(?:hang\s+)?(?:duong|quan|phuong)\s+\w|"
+            r"(?:tai|o|nha o)\s+(?:duong|quan|phuong|huyen)\s+\w|dia\s+chi\s+(?:nha|cua\s+khach|giao)|ten\s+duong\s+cua\s+khach)\b",
+            q_na
         ))
         if is_street_address_query:
             if not any(any(k in c for k in ["địa chỉ", "dia_chi", "đường", "duong", "address"]) for c in all_cols):
                 return True, "Shop không có thông tin địa chỉ hoặc tên đường của khách hàng."
 
         # 6. Giới tính khách hàng
-        if any(k in q for k in ["khách nam", "khách nữ", "giới tính", "nam hay nữ", "khach nam", "khach nu", "gioi tinh"]):
+        # "khách nam" có thể là tên người ("khách Nam"): chỉ coi là giới tính khi "Nam" không phải tên khách trong dữ liệu
+        if _kw(["giới tính", "nam hay nữ", "nữ hay nam", "nam giới", "nữ giới", "khách nữ", "khách hàng nữ", "phái nữ", "khách nam", "khách hàng nam"]):
             if not any(any(k in c for k in ["giới tính", "gioi_tinh", "gender"]) for c in all_cols):
-                return True, "Shop không có cột ghi nhận giới tính của khách hàng."
+                # "khách Nam" / "khách Nữ" viết hoa là tên người; viết thường "khách nam" là giới tính
+                raw_q = unicodedata.normalize("NFC", question_obj.get("question", ""))
+                gender_word_is_name = bool(re.search(r"[Kk]hách (?:hàng )?(?:Nam|Nữ)\b", raw_q))
+                if not gender_word_is_name:
+                    return True, "Shop không có cột ghi nhận giới tính của khách hàng."
 
         # 7. Lãi gộp / lãi ròng khi shop không có cột giá vốn
-        if any(k in q for k in ["lãi gộp", "lai gop", "lợi nhuận gộp", "lãi ròng", "lai rong"]):
+        # Chỉ khi rulebook đang dùng cấm tự tính lại giá vốn (giá vốn phải lấy trên dòng bán)
+        cogs_from_line_only = not rulebook_text or bool(re.search(r"không tự tính lại giá vốn", rulebook_text, re.I))
+        if cogs_from_line_only and any(k in q for k in ["lãi gộp", "lai gop", "lợi nhuận gộp", "lãi ròng", "lai rong"]):
             has_cogs = any(any(k in c for k in ["giá vốn", "gia_von", "giavon", "cost", "cogs", "giávốn"]) for c in all_cols)
             if not has_cogs:
                 return True, "Shop không có cột giá vốn trên dòng bán để tính lãi gộp theo Mục 5 Rulebook."
@@ -547,168 +653,106 @@ class RuleEngine:
 
         # 10. Tồn kho khi shop không có bảng tồn kho và không có dữ liệu nhập hàng
         if re.search(r"(?:trong\s*kho|tồn\s*kho|ton\s*kho|kho\s*còn|còn\s+.*(?:trong\s*kho|kho)|còn\s+bao\s+nhiêu\s+cái)", q):
-            has_stock_tbl = any(any(k in t for k in ["ton_kho", "tonkho", "tồn kho", "tồn_kho", "nhap", "nhập"]) for t in all_tbl_names)
-            has_stock_col = any(any(k in c for k in ["tồn cuối", "tồn thực", "ton kho", "tồn kho", "sl nhập", "số lượng nhập"]) for c in all_cols)
+            has_stock_tbl = any(any(k in t for k in ["ton_kho", "tonkho", "tồn kho", "tồn_kho", "nhap", "nhập", "kho", "stock", "inventory"]) for t in all_tbl_names)
+            # "Tồn nhỏ nhất/lớn nhất", "định mức tồn" là ngưỡng cấu hình, KHÔNG phải số tồn thực tế
+            _thresholds = ("nhỏ nhất", "lớn nhất", "tối thiểu", "tối đa", "định mức")
+            has_stock_col = any(
+                any(k in c for k in ["tồn", "ton_", "ton kho", "sl nhập", "số lượng nhập", "nhập", "stock", "inventory"])
+                and not any(t in c for t in _thresholds)
+                for c in all_cols
+            )
             if not (has_stock_tbl or has_stock_col):
                 return True, "Shop chỉ có dữ liệu bán hàng, không có bảng tồn kho hoặc dữ liệu nhập hàng để tính tồn kho."
 
-        # 11. Nhiệt độ bảo quản / độ ẩm môi trường / điều kiện bảo quản kho
-        if any(k in q for k in ["nhiệt độ bảo quản", "nhiet do bao quan", "nhiệt độ kho", "độ ẩm kho", "do am kho", "bảo quản ở nhiệt độ"]):
-            has_temp_col = any(any(k in c for k in ["nhiệt độ", "nhiet_do", "độ ẩm", "do_am", "temperature", "humidity"]) for c in all_cols)
-            if not has_temp_col:
-                return True, "Dữ liệu shop không theo dõi nhiệt độ hoặc độ ẩm bảo quản kho."
-
-        # 12. Định vị GPS / bản đồ / khoảng cách địa lý ngoài dữ liệu bán hàng
-        if any(k in q for k in ["khoảng cách từ", "khoang cach tu", "cách bao xa", "cach bao xa", "mấy cây số", "mấy km", "google maps", "bản đồ"]):
-            return True, "Dữ liệu shop không lưu trữ tọa độ GPS hay khoảng cách địa lý giao vận."
-
-        # 13. Thời tiết / khí tượng
-        if any(k in q for k in ["thời tiết", "thoi tiet", "dự báo thời tiết", "trời mưa hay nắng", "lượng mưa"]):
-            return True, "Dữ liệu kinh doanh không bao gồm thông tin thời tiết hay khí tượng."
-
-        # 14. Lịch trình giao thông / vé máy bay / tàu xe công cộng
-        if any(k in q for k in ["lịch tàu", "lịch xe", "vé máy bay", "ve may bay", "chuyến bay", "bến xe"]):
-            has_transport = any(any(k in t for k in ["ve_may_bay", "chuyen_bay", "tau_xe"]) for t in all_tbl_names)
-            if not has_transport:
-                return True, "Dữ liệu bán lẻ không bao gồm lịch trình vận tải hành khách công cộng."
-
         return False, ""
+
+    # Chủ đề câu hỏi -> từ khoá nhận diện trong câu hỏi và từ khoá nhận diện TIÊU ĐỀ mục rulebook
+    TOPICS = (
+        ("ranking", ("bán chạy", "chạy nhất", "nhiều nhất", "hot nhất", "lời nhất", "xếp hạng", "top", "nhân viên", "trung bình",
+                     "bình quân", "nhóm hàng", "khách mua", "khách quen", "liệt kê", "bán được bao nhiêu", "bán được mấy", "mặt hàng"),
+         ("xếp hạng",), 68),
+        ("debt", ("nợ", "công nợ", "trả nợ", "thu nợ", "chưa trả"), ("nợ",), 80),
+        ("stock", ("nhập", "tồn", "kho", "giá vốn", "lãi", "lời", "hết hàng", "ế", "bảng giá", "tăng giá", "đơn giá", "giá bán",
+                   "thùng", "hộp", "lốc", "hạn dùng", "hết hạn", "hạn sử dụng", "lô ", "chi phí"),
+         ("kho", "giá vốn", "nhập"), 80),
+    )
 
     def select_relevant_rules(self, question: str, biz_readme: str = "") -> str:
         """
-        Trích xuất các điều luật trong `rulebook.md` khớp với ngữ cảnh câu hỏi và ngành của shop.
+        Trích các mục rulebook liên quan, nhận diện mục theo TỪ KHOÁ TIÊU ĐỀ (không theo số mục cố định của một
+        rulebook cụ thể) và đưa nguyên văn vào prompt. Không thêm luật nào ngoài rulebook.
         """
         q = question.lower()
         readme_lower = biz_readme.lower()
-
-        selected_keys = []
-
-        # Mục 1 (Đơn hàng & doanh thu) luôn quan trọng cho hầu hết truy vấn
-        selected_keys.append("1. Đơn hàng và doanh thu")
-
-        # Mục 3: Xếp hạng / bán chạy / trung bình đơn / top khách hàng
-        if any(
-            kw in q
-            for kw in [
-                "bán chạy",
-                "chạy nhất",
-                "chay nhat",
-                "nhiều nhất",
-                "nhieu nhat",
-                "hot nhất",
-                "lời nhất",
-                "xếp hạng",
-                "top",
-                "nhân viên",
-                "trung bình",
-                "bình quân",
-                "nhóm hàng",
-                "phí phục vụ",
-                "top khách",
-                "khách mua nhiều",
-                "khách quen",
-                "hạng khách",
-            ]
-        ) or "phí phục vụ" in readme_lower:
-            selected_keys.append("3. Xếp hạng")
-
-        # Mục 4: Công nợ
-        if any(kw in q for kw in ["nợ", "no ", "công nợ", "cong no", "trả nợ", "thu nợ", "chưa trả", "còn lại"]):
-            selected_keys.append("4. Công nợ")
-
-        # Mục 5: Kho, nhập hàng, giá vốn, lãi gộp, lãi ròng, bảng giá
-        has_sec5 = any(
-            kw in q
-            for kw in [
-                "nhập",
-                "nhap",
-                "tồn",
-                "ton ",
-                "kho",
-                "giá vốn",
-                "gia von",
-                "lãi",
-                "lai ",
-                "hết hàng",
-                "hàng ế",
-                "bán ế",
-                "bảng giá",
-                "tăng giá",
-                "đơn giá",
-                "giá bán",
-                "thùng",
-                "hộp",
-                "lốc",
-            ]
-        ) or bool(re.search(r"(?<!trả\s)(?<!hãy\s)\b(?:lời|tiền lời|sinh lời|có lời|hàng ế|tồn ế)\b", q))
-        if has_sec5:
-            selected_keys.append("5. Kho, nhập hàng, giá vốn")
-
-        # Mục 6: Theo ngành (Tìm động các tiểu mục ngành khớp với README hoặc câu hỏi, không hardcode)
-        industry_sections = [k for k in self.sections if k.startswith("6. Theo ngành - ")]
-        for ind_key in industry_sections:
-            ind_name = ind_key.replace("6. Theo ngành - ", "").strip()
-            ind_clean = strip_accents(ind_name)
-            # 1. So khớp tên ngành trực tiếp trong câu hỏi hoặc README
-            if ind_name.lower() in q:
-                selected_keys.append(ind_key)
-                continue
-            if ind_name.lower() in readme_lower or ind_clean in strip_accents(biz_readme):
-                selected_keys.append(ind_key)
-                continue
-            # 2. Hoặc so khớp từ khóa đặc trưng trong nội dung tiểu mục luật ngành đó
-            sec_content = self.sections.get(ind_key, "")
-            bold_terms = re.findall(r"\*\*([^\*]+)\*\*", sec_content)
-            keywords_in_sec = [t.lower().strip() for t in bold_terms if len(t.strip()) >= 3 and not t.strip().startswith("Mục")]
-            if any(term in q or term in readme_lower for term in keywords_in_sec):
-                selected_keys.append(ind_key)
-
-        # Tóm tắt cô đọng Mục 2 (Thời gian & Ranh giới) dựa trên núm đọc động từ rulebook
-        morning_str = f"{self.knobs.shift_morning[0]}–{self.knobs.shift_morning[1]}"
-        afternoon_str = f"{self.knobs.shift_afternoon[0]}–{self.knobs.shift_afternoon[1]}"
-        compact_footer = (
-            f"## Quy tắc Thời gian & Ranh giới (Mục 2):\n"
-            f"- Tuần bắt đầu từ: {self.knobs.week_start_day}.\n"
-            f"- 'Quá N, hơn N, trên N, dưới N': không gồm N; 'Từ N trở lên, từ N trở xuống': gồm N.\n"
-            f"- Ca sáng: {morning_str}, ca chiều: {afternoon_str} (so ca chiều với ca sáng: mốc là ca sáng).\n"
-            f"- Hỏi số còn lại ('tính đến hết ngày X', 'còn nợ', 'còn tồn'): tính mọi phát sinh từ đầu dữ liệu đến hết ngày đó.\n"
-            f"- Sản phẩm có phân loại kích cỡ / size trong ngoặc đơn (S, M, L...): Khi câu hỏi nêu rõ size (ví dụ: 'Sinh tố xoài (L)', 'Trà sữa (M)'), BẮT BUỘC lọc chính xác tên có kèm size trong ngoặc ('%(L)%' hoặc '%(M)%'), TUYỆT ĐỐI KHÔNG lọc tên chung chung làm cộng dồn tất cả các size!"
-        )
-
-        seen = set()
         scored_blocks: List[Tuple[int, str]] = []
-        for k in selected_keys:
-            if k in seen:
-                continue
-            seen.add(k)
-            for sec_title, sec_body in self.sections.items():
-                if sec_title == k or sec_title.startswith(k):
-                    prio = 10
-                    k_low = k.lower()
-                    if "4. công nợ" in k_low and any(w in q for w in ["nợ", "công nợ"]):
-                        prio = 50
-                    elif "5. kho" in k_low and any(w in q for w in ["tồn", "kho", "nhập"]):
-                        prio = 40
-                    elif "3. xếp hạng" in k_low and any(w in q for w in ["top", "chạy nhất", "nhiều nhất", "xếp hạng"]):
-                        prio = 30
-                    elif "1. đơn hàng" in k_low:
-                        prio = 20
-                    elif k_low.startswith("6. theo ngành") and any(w in q for w in ["thuốc", "vật liệu", "bàn", "món", "ly"]):
-                        prio = 35
-                    scored_blocks.append((prio, sec_body))
-                    break
+        used: set = set()
 
-        # Giới hạn trần rules_prompt <= 2500 ký tự (ưu tiên section có điểm liên quan trực tiếp cao nhất)
+        def _add(title: Optional[str], prio: int) -> None:
+            if title and title not in used and self.sections.get(title):
+                used.add(title)
+                scored_blocks.append((prio, self.sections[title]))
+
+        _add("intro", 95)
+        _add(self._section_title("đơn hàng", "doanh thu"), 70)
+        _add(self._section_title("thời gian"), 72)
+        for _, q_keys, title_keys, prio in self.TOPICS:
+            if any(k in q for k in q_keys):
+                _add(self._section_title(*title_keys), prio)
+
+        # Luật ngành: mục con của mục "theo ngành", chọn khi tên ngành hoặc thuật ngữ in đậm của nó xuất hiện
+        for title, body in self.sections.items():
+            if " - " not in title or "ngành" not in title.lower():
+                continue
+            ind_name = title.split(" - ", 1)[1].strip().lower()
+            bold_terms = [t.lower().strip() for t in re.findall(r"\*\*([^\*]+)\*\*", body) if len(t.strip()) >= 3]
+            if (ind_name in q or ind_name in readme_lower or strip_accents(ind_name) in strip_accents(biz_readme)
+                    or any(t in q or t in readme_lower for t in bold_terms)):
+                _add(title, 90)
+
+        ans_title = self._section_title("đáp án", "chấm điểm")
+        if ans_title:
+            bullets = [ln for ln in self.sections[ans_title].splitlines() if ln.startswith("- **")]
+            if bullets:
+                used.add(ans_title)
+                scored_blocks.append((77, f"## {ans_title} (trích)\n" + "\n".join(bullets)))
+        _add(self._section_title("không trả lời"), 60)
+        _add(self._section_title("từ ngữ"), 55)
+        _add(self._section_title("cách ghi"), 30)
+
+        budget = 8000
         scored_blocks.sort(key=lambda x: x[0], reverse=True)
         kept_blocks: List[str] = []
         c_len = 0
         for _, body in scored_blocks:
-            if c_len + len(body) <= 2500 or not kept_blocks:
+            if c_len + len(body) <= budget or not kept_blocks:
                 kept_blocks.append(body)
                 c_len += len(body)
-
-        kept_blocks.append(compact_footer)
         return "\n\n".join(kept_blocks)
+
+    @staticmethod
+    def extract_readme_date_range(biz_readme: str) -> Optional[Tuple[Optional[str], Optional[str]]]:
+        """
+        Đọc khoảng ngày dữ liệu README công bố: 'Dữ liệu ... từ DD/MM/YYYY đến (hết) DD/MM/YYYY'
+        hoặc 'Dữ liệu có đến hết DD/MM/YYYY'. Trả về (start_iso, end_iso) hoặc None.
+        """
+        if not biz_readme:
+            return None
+        text = unicodedata.normalize("NFC", biz_readme)
+        d_pat = r"(\d{1,2})[/-](\d{1,2})[/-](20\d{2})"
+
+        def _iso(m: Any, off: int) -> Optional[str]:
+            try:
+                return date(int(m.group(off + 3)), int(m.group(off + 2)), int(m.group(off + 1))).isoformat()
+            except ValueError:
+                return None
+
+        m_rng = re.search(r"[Dd]ữ liệu[^\n.]*?từ\s*(?:ngày\s*)?" + d_pat + r"\s*(?:đến|tới|-|–)\s*(?:hết\s*)?(?:ngày\s*)?" + d_pat, text)
+        if m_rng:
+            return _iso(m_rng, 0), _iso(m_rng, 3)
+        m_end = re.search(r"[Dd]ữ liệu[^\n.]*?đến hết\s*(?:ngày\s*)?" + d_pat, text)
+        if m_end:
+            return None, _iso(m_end, 0)
+        return None
 
     @staticmethod
     def extract_readme_max_date(biz_readme: str) -> Optional[date]:
@@ -724,334 +768,121 @@ class RuleEngine:
 
 class DAILFewShotSelector:
     """
-    Kỹ thuật Few-Shot In-Context Learning theo kiến trúc DAIL-SQL (Alibaba Group, PVLDB/arXiv:2308.15363).
-    - DAIL-O (DAIL Organization): Giữ cấu trúc Question -> SQL mẫu, loại bỏ schema lặp lại của DB ví dụ để tiết kiệm token tối đa.
-    - DAIL-S (DAIL Selection): Nhận diện khung xương truy vấn (Query Skeleton Intent) để chọn đúng 1-2 ví dụ chuẩn nhất.
+    Few-shot theo cách TỔ CHỨC ví dụ của DAIL-SQL (DAIL-O: chỉ giữ cặp câu hỏi -> SQL, bỏ schema của DB ví dụ).
+    Phần CHỌN ví dụ là luật từ khoá theo dạng câu hỏi, KHÔNG phải DAIL-S của bài báo.
+    Các ví dụ chỉ minh hoạ CÚ PHÁP DuckDB; điều kiện nghiệp vụ để dạng <...theo rulebook> để mô hình điền từ
+    rulebook đang dùng (không nhúng luật của một rulebook cụ thể). Không có chú thích trong SQL mẫu để mô hình
+    không bắt chước viết chú thích.
     """
 
-    EXEMPLAR_CANCEL_RATE = (
-        "/* Ví dụ DAIL-O 1: Tính tỉ lệ đơn huỷ (%) trong kỳ */\n"
-        "-- Câu hỏi: Trong tháng 5/2025, tỉ lệ đơn huỷ là bao nhiêu phần trăm?\n"
-        "-- Lưu ý: BẮT BUỘC dùng COUNT(DISTINCT ...) cho cả tử số (đơn hủy) và mẫu số (tổng đơn). Không đếm số dòng sản phẩm:\n"
-        "SELECT ROUND(\n"
-        "  COUNT(DISTINCT CASE WHEN \"status_norm\" = 'Đã hủy' THEN \"Mã đơn\" END) * 100.0 / \n"
-        "  NULLIF(COUNT(DISTINCT \"Mã đơn\"), 0), \n"
-        "  2\n"
-        ") AS answer\n"
-        "FROM don_hang\n"
-        "WHERE \"Thời gian\" >= '2025-05-01' AND \"Thời gian\" < '2025-06-01';"
-    )
+    VALID = "<điều kiện bản ghi được tính theo rulebook>"
 
-    EXEMPLAR_GROWTH_PREV_MONTH = (
-        "/* Ví dụ DAIL-O 2: So sánh doanh thu với tháng liền trước (%) */\n"
-        "-- Câu hỏi: So với tháng liền trước, doanh thu tháng 6 năm 2026 thay đổi bao nhiêu %?\n"
-        "-- Lưu ý: Tháng liền trước của T6/2026 là cả tháng 5/2026 (M-1). Tuyệt đối KHÔNG so với tháng 6/2025 (cùng kỳ năm trước):\n"
-        "WITH monthly AS (\n"
-        "  SELECT SUBSTR(\"Thời gian\", 1, 7) AS ym, SUM(\"revenue_norm\") AS rev\n"
-        "  FROM ban_hang\n"
-        "  WHERE \"status_norm\" = 'Hoàn thành' AND SUBSTR(\"Thời gian\", 1, 7) IN ('2026-05', '2026-06')\n"
-        "  GROUP BY ym\n"
-        ")\n"
-        "SELECT ROUND((curr.rev - prev.rev) * 100.0 / NULLIF(prev.rev, 0), 2) AS answer\n"
-        "FROM (SELECT rev FROM monthly WHERE ym = '2026-06') curr,\n"
-        "     (SELECT rev FROM monthly WHERE ym = '2026-05') prev;"
-    )
+    EXEMPLARS = {
+        "period_sum": (
+            "Câu hỏi: Tổng <đại lượng> từ ngày a đến ngày b là bao nhiêu?\n"
+            "SQL:\n"
+            "SELECT COALESCE(SUM(\"<cột đại lượng>\"), 0)\n"
+            "FROM <bảng>\n"
+            "WHERE {valid}\n"
+            "  AND CAST(\"<cột ngày>\" AS DATE) BETWEEN DATE 'a' AND DATE 'b';"
+        ),
+        "growth": (
+            "Câu hỏi: <Đại lượng> kỳ A thay đổi bao nhiêu % so với kỳ B?\n"
+            "SQL:\n"
+            "WITH ky AS (\n"
+            "  SELECT\n"
+            "    SUM(CASE WHEN CAST(\"<cột ngày>\" AS DATE) BETWEEN DATE 'a1' AND DATE 'a2' THEN \"<cột đại lượng>\" ELSE 0 END) AS ky_a,\n"
+            "    SUM(CASE WHEN CAST(\"<cột ngày>\" AS DATE) BETWEEN DATE 'b1' AND DATE 'b2' THEN \"<cột đại lượng>\" ELSE 0 END) AS ky_b\n"
+            "  FROM <bảng> WHERE {valid}\n"
+            ")\n"
+            "SELECT (ky_a - ky_b) * 100.0 / NULLIF(ky_b, 0) FROM ky;"
+        ),
+        "top_k": (
+            "Câu hỏi: k <đối tượng> có <tiêu chí> cao nhất kỳ a-b là gì?\n"
+            "SQL:\n"
+            "SELECT ANY_VALUE(\"<cột tên>\") AS ten\n"
+            "FROM <bảng>\n"
+            "WHERE {valid} AND CAST(\"<cột ngày>\" AS DATE) BETWEEN DATE 'a' AND DATE 'b'\n"
+            "GROUP BY \"<cột mã>\"\n"
+            "ORDER BY SUM(\"<cột tiêu chí>\") DESC, \"<cột mã>\" ASC\n"
+            "LIMIT k;"
+        ),
+        "count_distinct": (
+            "Câu hỏi: Có bao nhiêu <đơn / khách> trong kỳ a-b?\n"
+            "SQL:\n"
+            "SELECT COUNT(DISTINCT \"<cột mã>\")\n"
+            "FROM <bảng>\n"
+            "WHERE {valid} AND CAST(\"<cột ngày>\" AS DATE) BETWEEN DATE 'a' AND DATE 'b';"
+        ),
+        "share": (
+            "Câu hỏi: <Nhóm X> chiếm bao nhiêu % <đại lượng> kỳ a-b?\n"
+            "SQL:\n"
+            "SELECT SUM(CASE WHEN \"<cột nhóm>\" = '<X>' THEN \"<cột đại lượng>\" ELSE 0 END) * 100.0\n"
+            "       / NULLIF(SUM(\"<cột đại lượng>\"), 0)\n"
+            "FROM <bảng>\n"
+            "WHERE {valid} AND CAST(\"<cột ngày>\" AS DATE) BETWEEN DATE 'a' AND DATE 'b';"
+        ),
+        "ratio_of_records": (
+            "Câu hỏi: Tỉ lệ <loại bản ghi Y> trong kỳ a-b là bao nhiêu %?\n"
+            "SQL:\n"
+            "SELECT COUNT(DISTINCT CASE WHEN <điều kiện Y> THEN \"<cột mã>\" END) * 100.0\n"
+            "       / NULLIF(COUNT(DISTINCT \"<cột mã>\"), 0)\n"
+            "FROM <bảng>\n"
+            "WHERE <điều kiện mẫu số theo rulebook> AND CAST(\"<cột ngày>\" AS DATE) BETWEEN DATE 'a' AND DATE 'b';"
+        ),
+        "hour_bucket": (
+            "Câu hỏi: So <đại lượng> giữa hai khung giờ h1-h2 và h3-h4?\n"
+            "SQL:\n"
+            "SELECT\n"
+            "  SUM(CASE WHEN hour(CAST(\"<cột thời gian>\" AS TIMESTAMP)) BETWEEN h1 AND h2 THEN \"<cột đại lượng>\" ELSE 0 END),\n"
+            "  SUM(CASE WHEN hour(CAST(\"<cột thời gian>\" AS TIMESTAMP)) BETWEEN h3 AND h4 THEN \"<cột đại lượng>\" ELSE 0 END)\n"
+            "FROM <bảng> WHERE {valid};"
+        ),
+        "entity_filter": (
+            "Câu hỏi: <Đại lượng> của mặt hàng 'tên gõ không dấu' kỳ a-b?\n"
+            "SQL:\n"
+            "SELECT COALESCE(SUM(\"<cột đại lượng>\"), 0)\n"
+            "FROM <bảng>\n"
+            "WHERE {valid} AND CAST(\"<cột ngày>\" AS DATE) BETWEEN DATE 'a' AND DATE 'b'\n"
+            "  AND strip_accents(\"<cột tên>\") ILIKE strip_accents('%tên gõ không dấu%');"
+        ),
+        "trend_boolean": (
+            "Câu hỏi: <Đại lượng> các tháng m1, m2, m3 có tăng liên tục không?\n"
+            "SQL:\n"
+            "WITH theo_thang AS (\n"
+            "  SELECT SUBSTR(\"<cột ngày>\", 1, 7) AS ym, SUM(\"<cột đại lượng>\") AS v\n"
+            "  FROM <bảng> WHERE {valid} GROUP BY ym\n"
+            ")\n"
+            "SELECT (SELECT v FROM theo_thang WHERE ym = 'm1') < (SELECT v FROM theo_thang WHERE ym = 'm2')\n"
+            "   AND (SELECT v FROM theo_thang WHERE ym = 'm2') < (SELECT v FROM theo_thang WHERE ym = 'm3');"
+        ),
+    }
 
-    EXEMPLAR_GROWTH_SAME_PERIOD_MONTH = (
-        "/* Ví dụ DAIL-O 3: So sánh doanh thu với cùng kỳ tháng trước (%) */\n"
-        "-- Câu hỏi: Từ đầu tháng này đến hết hôm nay (15/07/2026), doanh thu thay đổi bao nhiêu % so với cùng kỳ tháng trước?\n"
-        "-- Lưu ý: Cùng kỳ tháng trước là từ ngày 01 đến cùng ngày D của tháng trước (01/06/2026 đến 15/06/2026):\n"
-        "WITH p AS (\n"
-        "  SELECT \n"
-        "    SUM(CASE WHEN \"Thời gian\" >= '2026-07-01' AND \"Thời gian\" <= '2026-07-15 23:59:59' THEN \"revenue_norm\" ELSE 0 END) AS curr_rev,\n"
-        "    SUM(CASE WHEN \"Thời gian\" >= '2026-06-01' AND \"Thời gian\" <= '2026-06-15 23:59:59' THEN \"revenue_norm\" ELSE 0 END) AS prev_rev\n"
-        "  FROM ban_hang\n"
-        "  WHERE \"status_norm\" = 'Hoàn thành'\n"
-        ")\n"
-        "SELECT ROUND((curr_rev - prev_rev) * 100.0 / NULLIF(prev_rev, 0), 2) AS answer FROM p;"
-    )
-
-    EXEMPLAR_GROWTH_SAME_PERIOD_YEAR = (
-        "/* Ví dụ DAIL-O 4: So sánh doanh thu với cùng kỳ năm trước (%) */\n"
-        "-- Câu hỏi: Doanh thu tháng 5/2026 tăng trưởng bao nhiêu % so với cùng kỳ năm trước (tháng 5/2025)?\n"
-        "-- Lưu ý: So cùng kỳ năm trước là so với cùng tháng M của năm Y-1:\n"
-        "WITH monthly AS (\n"
-        "  SELECT SUBSTR(\"Thời gian\", 1, 7) AS ym, SUM(\"revenue_norm\") AS rev\n"
-        "  FROM ban_hang\n"
-        "  WHERE \"status_norm\" = 'Hoàn thành' AND SUBSTR(\"Thời gian\", 1, 7) IN ('2025-05', '2026-05')\n"
-        "  GROUP BY ym\n"
-        ")\n"
-        "SELECT ROUND((curr.rev - prev.rev) * 100.0 / NULLIF(prev.rev, 0), 2) AS answer\n"
-        "FROM (SELECT rev FROM monthly WHERE ym = '2026-05') curr,\n"
-        "     (SELECT rev FROM monthly WHERE ym = '2025-05') prev;"
-    )
-
-    EXEMPLAR_TOP_ITEMS_QTY_BASE = (
-        "/* Ví dụ DAIL-O 5: Tìm mặt hàng bán chạy nhất */\n"
-        "-- Câu hỏi: Hàng nào bán chạy nhất tháng 1/2025?\n"
-        "-- Lưu ý: BẮT BUỘC ORDER BY SUM(\"qty_base\") DESC (theo số lượng quy đổi ra đơn vị cơ bản lẻ nhỏ nhất). Không order by số lượng thô:\n"
-        "SELECT \"Tên hàng\" AS answer\n"
-        "FROM ban_hang\n"
-        "WHERE \"status_norm\" = 'Hoàn thành'\n"
-        "  AND \"Thời gian\" >= '2025-01-01' AND \"Thời gian\" < '2025-02-01'\n"
-        "GROUP BY \"Tên hàng\"\n"
-        "ORDER BY SUM(COALESCE(\"qty_base\", \"Số lượng\")) DESC\n"
-        "LIMIT 1;"
-    )
-
-    EXEMPLAR_SINGLE_ITEM_QUERY = (
-        "/* Ví dụ DAIL-O 6: Doanh thu của một món ăn / mặt hàng cụ thể */\n"
-        "-- Câu hỏi: Xem giúp tiền bán cơm chiên dương châu tháng 3/2025 là bao nhiêu?\n"
-        "-- Lưu ý: BẮT BUỘC lọc đúng tên món trong mệnh đề WHERE (ILIKE). Tuyệt đối KHÔNG tính tổng cả tháng của toàn cửa hàng:\n"
-        "SELECT COALESCE(SUM(\"revenue_norm\"), 0) AS answer\n"
-        "FROM ban_hang\n"
-        "WHERE \"status_norm\" = 'Hoàn thành'\n"
-        "  AND \"Thời gian\" >= '2025-03-01' AND \"Thời gian\" < '2025-04-01'\n"
-        "  AND \"Tên hàng\" ILIKE '%cơm chiên dương châu%';"
-    )
-
-    EXEMPLAR_CUSTOMER_DEBT = (
-        "/* Ví dụ DAIL-O 7: Bảng khách hàng có công nợ lớn nhất */\n"
-        "-- Câu hỏi: Top 3 khách có công nợ lớn nhất đến hết ngày 14/09/2026?\n"
-        "-- Lưu ý: Bắt buộc loại trừ 'Khách lẻ' / 'khách vãng lai' và các dòng nợ <= 0:\n"
-        "SELECT \"Tên khách\" AS khach_hang, SUM(\"Nợ\") AS so_tien_no\n"
-        "FROM cong_no\n"
-        "WHERE \"Thời gian\" <= '2026-09-14 23:59:59'\n"
-        "  AND \"Tên khách\" NOT ILIKE '%khách lẻ%' AND \"Tên khách\" NOT ILIKE '%lẻ%' AND \"Tên khách\" IS NOT NULL\n"
-        "GROUP BY \"Tên khách\"\n"
-        "HAVING SUM(\"Nợ\") > 0\n"
-        "ORDER BY so_tien_no DESC\n"
-        "LIMIT 3;"
-    )
-
-    EXEMPLAR_SHIFT_COMPARISON = (
-        "/* Ví dụ DAIL-O 8: So sánh ca chiều với ca sáng (%) */\n"
-        "-- Câu hỏi: Tháng 12/2025 doanh thu ca chiều tăng hay giảm bao nhiêu % so với ca sáng?\n"
-        "-- Lưu ý: Ca sáng: 06:00-13:59:59; Ca chiều: 14:00-21:59:59. Mẫu số so sánh là Ca sáng:\n"
-        "WITH shifts AS (\n"
-        "  SELECT \n"
-        "    SUM(CASE WHEN hour(try_cast(\"Thời gian\" AS TIMESTAMP)) BETWEEN 6 AND 13 THEN \"revenue_norm\" ELSE 0 END) AS sang,\n"
-        "    SUM(CASE WHEN hour(try_cast(\"Thời gian\" AS TIMESTAMP)) BETWEEN 14 AND 21 THEN \"revenue_norm\" ELSE 0 END) AS chieu\n"
-        "  FROM ban_hang\n"
-        "  WHERE \"status_norm\" = 'Hoàn thành'\n"
-        "    AND \"Thời gian\" >= '2025-12-01' AND \"Thời gian\" < '2026-01-01'\n"
-        ")\n"
-        "SELECT ROUND((chieu - sang) * 100.0 / NULLIF(sang, 0), 2) AS answer FROM shifts;"
-    )
-
-    EXEMPLAR_DISTINCT_CUSTOMERS = (
-        "/* Ví dụ DAIL-O 9: Đếm số lượng khách hàng mua hàng (loại bỏ Khách lẻ) */\n"
-        "-- Câu hỏi: Trong tháng 8/2025 có bao nhiêu khách hàng khác nhau đến mua hàng?\n"
-        "-- Lưu ý: Dùng COUNT(DISTINCT ...) và bắt buộc loại trừ 'Khách lẻ':\n"
-        "SELECT COUNT(DISTINCT \"Khách hàng\") AS answer\n"
-        "FROM ban_hang\n"
-        "WHERE \"status_norm\" = 'Hoàn thành'\n"
-        "  AND CAST(\"Ngày\" AS DATE) BETWEEN DATE '2025-08-01' AND DATE '2025-08-31'\n"
-        "  AND \"Khách hàng\" NOT ILIKE '%khách lẻ%' AND \"Khách hàng\" IS NOT NULL;"
-    )
-
-    EXEMPLAR_SALES_BY_CHANNEL = (
-        "/* Ví dụ DAIL-O 10: Doanh thu theo từng kênh bán hàng hoặc hình thức thanh toán */\n"
-        "-- Câu hỏi: Doanh thu các đơn bán tại quầy và các đơn giao tận nơi trong tháng này mỗi loại bao nhiêu?\n"
-        "-- Lưu ý: Trả về dạng list [tien_quay, tien_giao] theo thứ tự hỏi:\n"
-        "SELECT [\n"
-        "  COALESCE(SUM(CASE WHEN \"Kênh bán\" ILIKE '%quầy%' THEN \"revenue_norm\" ELSE 0 END), 0),\n"
-        "  COALESCE(SUM(CASE WHEN \"Kênh bán\" ILIKE '%giao%' OR \"Kênh bán\" ILIKE '%ship%' THEN \"revenue_norm\" ELSE 0 END), 0)\n"
-        "] AS answer\n"
-        "FROM ban_hang\n"
-        "WHERE \"status_norm\" = 'Hoàn thành'\n"
-        "  AND CAST(\"Ngày\" AS DATE) BETWEEN DATE 'start_date' AND DATE 'end_date';"
-    )
-
-    EXEMPLAR_YTD_REVENUE = (
-        "/* Ví dụ DAIL-O 11: Doanh thu lũy kế từ đầu năm đến nay (Year-To-Date) */\n"
-        "-- Câu hỏi: Tính từ đầu năm đến hết ngày hôm nay (15/09/2026), tổng doanh thu là bao nhiêu?\n"
-        "-- Lưu ý: Lọc từ ngày 01/01 của năm đó đến as_of_date:\n"
-        "SELECT COALESCE(SUM(\"revenue_norm\"), 0) AS answer\n"
-        "FROM ban_hang\n"
-        "WHERE \"status_norm\" = 'Hoàn thành'\n"
-        "  AND CAST(\"Ngày\" AS DATE) BETWEEN DATE '2026-01-01' AND DATE '2026-09-15';"
-    )
-
-    EXEMPLAR_EXPIRY_GOODS = (
-        "/* Ví dụ DAIL-O 12: Đếm số mặt hàng cận date hoặc hết hạn sử dụng (HSD) */\n"
-        "-- Câu hỏi: Tính đến hôm nay, có mấy lô hàng đã hết hạn sử dụng?\n"
-        "-- Lưu ý: So sánh cột Hạn sử dụng với ngày hiện tại:\n"
-        "SELECT COUNT(*) AS answer\n"
-        "FROM ton_kho\n"
-        "WHERE CAST(\"Hạn sử dụng\" AS DATE) <= DATE '2025-06-30';"
-    )
-
-    EXEMPLAR_TOP_CUSTOMER = (
-        "/* Ví dụ DAIL-O 13: Tìm khách hàng mua nhiều nhất / chi tiêu nhiều nhất */\n"
-        "-- Câu hỏi: Khách hàng nào chi tiêu nhiều nhất trong tháng 5/2025?\n"
-        "-- Lưu ý: BẮT BUỘC loại bỏ 'Khách lẻ', 'lẻ', 'vãng lai' và NULL để tìm tên khách hàng cụ thể:\n"
-        "SELECT \"Khách hàng\" AS answer\n"
-        "FROM ban_hang\n"
-        "WHERE \"status_norm\" = 'Hoàn thành'\n"
-        "  AND \"Thời gian\" >= '2025-05-01' AND \"Thời gian\" < '2025-06-01'\n"
-        "  AND \"Khách hàng\" NOT ILIKE '%khách lẻ%'\n"
-        "  AND \"Khách hàng\" NOT ILIKE '%lẻ%'\n"
-        "  AND \"Khách hàng\" NOT ILIKE '%vãng lai%'\n"
-        "  AND \"Khách hàng\" IS NOT NULL\n"
-        "GROUP BY \"Khách hàng\"\n"
-        "ORDER BY SUM(\"revenue_norm\") DESC\n"
-        "LIMIT 1;"
-    )
-
-    EXEMPLAR_CATEGORY_SHARE = (
-        "/* Ví dụ DAIL-O 14: Tỉ trọng đóng góp doanh thu của một nhóm hàng / kênh (%) */\n"
-        "-- Câu hỏi: Nhóm hàng Nước uống đóng góp bao nhiêu % trong tổng doanh thu tháng 7/2025?\n"
-        "-- Lưu ý: Tử số là doanh thu nhóm hàng, mẫu số là tổng doanh thu toàn cửa hàng trong cùng kỳ:\n"
-        "SELECT ROUND(\n"
-        "  COALESCE(SUM(CASE WHEN \"Nhóm hàng\" ILIKE '%nước uống%' THEN \"revenue_norm\" ELSE 0 END), 0) * 100.0 /\n"
-        "  NULLIF(SUM(\"revenue_norm\"), 0),\n"
-        "  2\n"
-        ") AS answer\n"
-        "FROM ban_hang\n"
-        "WHERE \"status_norm\" = 'Hoàn thành'\n"
-        "  AND \"Thời gian\" >= '2025-07-01' AND \"Thời gian\" < '2025-08-01';"
-    )
-
-    EXEMPLAR_TOP_CUSTOMERS_LIST = (
-        "/* Ví dụ DAIL-O 15: Top N khách hàng mua nhiều nhất / chi tiêu nhiều nhất (dạng danh sách) */\n"
-        "-- Câu hỏi: 5 khách hàng có tổng tiền mua cao nhất tuần rồi là ai?\n"
-        "-- Lưu ý: BẮT BUỘC loại bỏ 'Khách lẻ', 'lẻ', 'vãng lai' và NULL trong WHERE TRƯỚC KHI LIMIT N để trả về đủ N khách hàng thực tế:\n"
-        "SELECT \"Khách hàng\"\n"
-        "FROM ban_hang\n"
-        "WHERE \"status_norm\" = 'Hoàn thành'\n"
-        "  AND CAST(\"Ngày\" AS DATE) BETWEEN DATE '2025-07-28' AND DATE '2025-08-03'\n"
-        "  AND \"Khách hàng\" NOT ILIKE '%khách lẻ%'\n"
-        "  AND \"Khách hàng\" NOT ILIKE '%lẻ%'\n"
-        "  AND \"Khách hàng\" NOT ILIKE '%vãng lai%'\n"
-        "  AND \"Khách hàng\" IS NOT NULL\n"
-        "GROUP BY \"Khách hàng\"\n"
-        "ORDER BY SUM(COALESCE(\"revenue_norm\", \"Thành tiền\")) DESC\n"
-        "LIMIT 5;"
-    )
-
-    EXEMPLAR_SINGLE_ITEM_QTY = (
-        "/* Ví dụ DAIL-O 16: Số lượng bán ra của một món ăn / mặt hàng cụ thể (mấy đĩa / kg / ly / lon / cái / nồi) */\n"
-        "-- Câu hỏi: Trong tháng 1/2025 cửa hàng bán được mấy nồi lẩu gà lá é?\n"
-        "-- Lưu ý: Hỏi SỐ LƯỢNG (mấy nồi, mấy đĩa, mấy kg, mấy lon, bao nhiêu gói) thì BẮT BUỘC tính tổng sản lượng `qty_base` (hoặc Số lượng), tuyệt đối KHÔNG tính doanh thu tiền:\n"
-        "SELECT COALESCE(SUM(COALESCE(\"qty_base\", \"Số lượng\")), 0) AS answer\n"
-        "FROM ban_hang\n"
-        "WHERE \"status_norm\" = 'Hoàn thành'\n"
-        "  AND \"Thời gian\" >= '2025-01-01' AND \"Thời gian\" < '2025-02-01'\n"
-        "  AND \"Tên hàng\" ILIKE '%lẩu gà lá é%';"
-    )
-
-    EXEMPLAR_BOOLEAN_TREND = (
-        "/* Ví dụ DAIL-O 17: Kiểm tra xu hướng doanh thu có tăng liên tục qua các tháng không (True/False) */\n"
-        "-- Câu hỏi: Doanh thu 3 tháng 5/2025, 6/2025, 7/2025 có tăng liên tục không?\n"
-        "-- Lưu ý: Tính doanh thu từng tháng bằng WITH monthly AS (...), sau đó so sánh bằng scalar subqueries:\n"
-        "WITH monthly AS (\n"
-        "  SELECT SUBSTR(\"Thời gian\", 1, 7) AS ym, SUM(\"revenue_norm\") AS rev\n"
-        "  FROM ban_hang\n"
-        "  WHERE \"status_norm\" = 'Hoàn thành' AND SUBSTR(\"Thời gian\", 1, 7) IN ('2025-05', '2025-06', '2025-07')\n"
-        "  GROUP BY ym\n"
-        ")\n"
-        "SELECT CASE\n"
-        "  WHEN (SELECT rev FROM monthly WHERE ym = '2025-05') < (SELECT rev FROM monthly WHERE ym = '2025-06')\n"
-        "   AND (SELECT rev FROM monthly WHERE ym = '2025-06') < (SELECT rev FROM monthly WHERE ym = '2025-07')\n"
-        "  THEN TRUE ELSE FALSE\n"
-        "END AS answer;"
+    INTENTS = (
+        ("ratio_of_records", ("ti le", "ty le")),
+        ("growth", ("so voi", "tang bao nhieu %", "giam bao nhieu %", "thay doi", "tang truong", "cung ky")),
+        ("share", ("chiem", "ti trong", "ty trong", "dong gop")),
+        ("top_k", ("nhat", "top ", "xep hang")),
+        ("count_distinct", ("bao nhieu don", "may don", "so don", "bao nhieu khach", "may khach", "so khach")),
+        ("hour_bucket", ("ca sang", "ca chieu", "khung gio", " gio ")),
+        ("trend_boolean", ("lien tuc", "luon tang", "luon giam", "tang deu")),
     )
 
     @classmethod
     def select_exemplars(cls, question: str, has_entity_hint: bool = False) -> str:
-        """
-        DAIL-S: Tự động trích xuất 1-2 ví dụ có khung xương (Skeleton) tương đồng nhất theo intent của câu hỏi.
-        """
-        q_norm = RuleEngine.normalize_telex_typos(question.lower().strip())
-        q = strip_accents(q_norm).lower().strip()
+        """Chọn tối đa 2 ví dụ cú pháp theo dạng câu hỏi (DAIL-O: chỉ cặp câu hỏi -> SQL)."""
+        q = " " + strip_accents(question).lower() + " "
         selected: List[str] = []
-
-        # Intent 1: Tỉ lệ đơn hủy
-        if any(kw in q for kw in ["ti le huy", "ti le don huy", "% don bi huy", "% don huy", "don bi huy"]):
-            selected.append(cls.EXEMPLAR_CANCEL_RATE)
-
-        # Intent 2: So sánh cùng kỳ tháng trước
-        if any(kw in q for kw in ["cung ky thang truoc", "cung ky th truoc", "cung ky thang trc", "cung ky th trc"]):
-            selected.append(cls.EXEMPLAR_GROWTH_SAME_PERIOD_MONTH)
-
-        # Intent 3: So sánh tháng liền trước (không phải cùng kỳ)
-        elif any(kw in q for kw in ["thang lien truoc", "thang truoc do", "hon hay kem thang truoc", "hon hay kem thang trc", "so voi thang truoc", "so voi thang trc"]):
-            selected.append(cls.EXEMPLAR_GROWTH_PREV_MONTH)
-
-        # Intent 4: So sánh cùng kỳ năm trước
-        elif any(kw in q for kw in ["cung ky nam truoc", "cung ky nam ngoai", "so voi cung ky nam truoc"]):
-            selected.append(cls.EXEMPLAR_GROWTH_SAME_PERIOD_YEAR)
-
-        # Intent 5: Tỉ trọng đóng góp danh mục / nhóm hàng (%)
-        if any(kw in q for kw in ["dong gop", "chiem bao nhieu %", "chiem bao nhieu phan tram", "ti trong", "ty trong", "phan tram doanh thu"]):
-            selected.append(cls.EXEMPLAR_CATEGORY_SHARE)
-
-        # Intent 6: Top khách hàng mua nhiều nhất / chi tiêu nhiều nhất (loại bỏ Khách lẻ)
-        if any(kw in q for kw in [
-            "ai mua", "khach nao mua", "khach nao chi", "khach hang nao mua", "khach mua nhieu",
-            "chi tieu nhieu nhat", "mua nhieu nhat", "ai chi tieu", "ai la nguoi mua",
-            "mua cao nhat", "tong tien mua cao", "tien mua cao nhat", "chi nhieu nhat", "mua nhieu tien nhat"
-        ]):
-            if any(kw in q for kw in ["top 3", "top 5", "top 10", "3 khach", "5 khach", "nhung khach"]):
-                selected.append(cls.EXEMPLAR_TOP_CUSTOMERS_LIST)
-            else:
-                selected.append(cls.EXEMPLAR_TOP_CUSTOMER)
-
-        # Intent 7: So sánh ca chiều với ca sáng
-        if any(kw in q for kw in ["ca chieu", "ca sang"]) and any(kw in q for kw in ["so voi", "so vs", "chenh", "tang hay giam"]):
-            selected.append(cls.EXEMPLAR_SHIFT_COMPARISON)
-
-        # Intent 8: Top bán chạy / chạy nhất
-        if any(kw in q for kw in ["chay nhat", "hot nhat", "ban nhieu nhat", "ban chay nhat", "top 3 sp", "top 5 sp", "top 5 hang"]):
-            selected.append(cls.EXEMPLAR_TOP_ITEMS_QTY_BASE)
-
-        # Intent 9: Đếm số lượng khách hàng khác nhau
-        if any(kw in q for kw in ["khach hang khac nhau", "so khach den mua", "may khach den mua", "may khach mua", "bao nhieu khach hang den mua"]):
-            selected.append(cls.EXEMPLAR_DISTINCT_CUSTOMERS)
-
-        # Intent 10: Doanh thu theo kênh bán / hình thức
-        if any(kw in q for kw in ["moi loai bao nhieu", "moi hinh thuc bao nhieu", "ban tai quay va"]) and any(kw in q for kw in ["doanh thu", "dthu"]):
-            selected.append(cls.EXEMPLAR_SALES_BY_CHANNEL)
-
-        # Intent 11: Doanh thu lũy kế từ đầu năm (YTD)
-        if any(kw in q for kw in ["tu dau nam", "dau nam den nay", "luy ke tu dau nam"]):
-            selected.append(cls.EXEMPLAR_YTD_REVENUE)
-
-        # Intent 12: Hết hạn sử dụng / HSD / Cận date
-        if any(kw in q for kw in ["het han", "can date", "het date", "qua han dung"]):
-            selected.append(cls.EXEMPLAR_EXPIRY_GOODS)
-
-        # Intent 13: Xu hướng doanh thu có tăng liên tục không (Boolean)
-        if any(kw in q for kw in ["tang lien tuc", "tăng liên tục", "luon tang", "luôn tăng", "tang deu", "tăng đều"]):
-            selected.append(cls.EXEMPLAR_BOOLEAN_TREND)
-
-        # Intent 14: Hỏi về 1 món ăn / sản phẩm cụ thể (Số lượng vs Doanh thu)
-        if has_entity_hint and not any(kw in q for kw in ["chay nhat", "hot nhat", "ban nhieu nhat"]):
-            is_qty_q = any(kw in q for kw in [
-                "may noi", "may dia", "may kg", "may ly", "may lon", "may chai", "may hop", "may goi",
-                "so kg", "so luong kg", "bao nhieu noi", "bao nhieu dia", "bao nhieu ly", "bao nhieu kg",
-                "bao nhieu lon", "bao nhieu chai", "bao nhieu hop", "bao nhieu goi", "san luong", "so luong",
-            ])
-            if is_qty_q:
-                selected.append(cls.EXEMPLAR_SINGLE_ITEM_QTY)
-            else:
-                selected.append(cls.EXEMPLAR_SINGLE_ITEM_QUERY)
-
-        # Intent 15: Công nợ khách hàng
-        if any(kw in q for kw in ["cong no", "con no", "no nhieu nhat"]):
-            selected.append(cls.EXEMPLAR_CUSTOMER_DEBT)
-
-        # Giới hạn tối đa 2 ví dụ để đảm bảo token efficiency theo DAIL-O
-        chosen = selected[:2]
-        if not chosen:
-            # Fallback ví dụ doanh thu thuần cơ bản
-            return ""
-
-        formatted_block = (
-            "=== VÍ DỤ MINH HỌA TRUY VẤN DUCKDB SQL CHUẨN (DAIL-O FEW-SHOT) ===\n"
+        for name, keys in cls.INTENTS:
+            if any(k in q for k in keys) and name not in selected:
+                selected.append(name)
+        if has_entity_hint:
+            selected.append("entity_filter")
+        if not selected:
+            selected.append("period_sum")
+        chosen = [cls.EXEMPLARS[n].format(valid=cls.VALID) for n in selected[:2]]
+        return (
+            "=== VÍ DỤ CÚ PHÁP DUCKDB (chỉ minh hoạ cấu trúc; thay <...> bằng bảng, cột và luật thật) ===\n"
             + "\n\n".join(chosen)
             + "\n"
         )
-        return formatted_block
-

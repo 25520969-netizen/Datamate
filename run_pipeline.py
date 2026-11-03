@@ -547,6 +547,12 @@ def main() -> None:
                 pa = (tally["correct"] - tally["wrong"]) / n * 100 if n else 0.0
                 line += f" | PA tạm {pa:.1f}% (đúng {tally['correct']}/sai {tally['wrong']}/bỏ qua {tally['abstain']})"
             print(f"  {line}", flush=True)
+            if pred.get("type") == "abstain":
+                for n in (1, 2):
+                    p_pred = details.get(f"prompt{n}_pred") or {}
+                    err = p_pred.get("error") if isinstance(p_pred, dict) else None
+                    if err:
+                        print(f"      ↳ P{n}: {' '.join(str(err).split())[-220:]}", flush=True)
 
     if to_run:
         if args.concurrency > 1 and len(to_run) > 1:
